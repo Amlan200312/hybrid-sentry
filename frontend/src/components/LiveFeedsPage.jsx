@@ -1,359 +1,522 @@
 import { useState, useEffect, useRef } from 'react'
+import { VideoOff, Bell, Radio, Video, Download } from 'lucide-react'
+import WiFiSignalBars from './WiFiSignalBars'
+import BatteryIndicator from './BatteryIndicator'
 
-const API = 'http://localhost:8000'
+/* ── helpers ── */
+function timeAgo(ts) {
+  const diff = Date.now() - new Date(ts).getTime()
+  if (diff < 60000)   return `${Math.floor(diff / 1000)}s ago`
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
+  return `${Math.floor(diff / 3600000)}h ago`
+}
 
-/* ── Skeleton row ── */
-function SkeletonRow() {
+const wifiColor = (dbm) => dbm > -60 ? '#3fb950' : dbm > -70 ? '#d29922' : '#f85149'
+const batColor  = (pct)  => pct  > 50  ? '#3fb950' : pct  > 20  ? '#d29922' : '#f85149'
+
+function SkeletonRecorderCard() {
   return (
-    <div style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--bg-elevated)' }}>
-      <div className="skeleton" style={{ width: 60, height: 12 }} />
-      <div className="skeleton" style={{ width: 80, height: 12 }} />
-      <div className="skeleton" style={{ width: 100, height: 12 }} />
-      <div className="skeleton" style={{ flex: 1, height: 12 }} />
+    <div style={{ padding: 10, borderRadius: 6, border: '1px solid var(--border)', marginBottom: 8, background: 'var(--bg-elevated)' }}>
+      <div className="skeleton" style={{ height: 13, width: '55%', marginBottom: 6 }} />
+      <div className="skeleton" style={{ height: 10, width: '40%', marginBottom: 5 }} />
+      <div className="skeleton" style={{ height: 10, width: '70%' }} />
     </div>
   )
 }
 
-/* ── Error state ── */
-function ErrorState({ message, onRetry }) {
-  return (
-    <div className="error-state">
-      <div style={{ fontSize: 13, color: 'var(--accent-red)', fontWeight: 600 }}>Failed to load</div>
-      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{message}</div>
-      <button className="btn btn-secondary btn-sm" onClick={onRetry}>↺ Retry</button>
-    </div>
-  )
-}
-
-/* ── Stats strip ── */
-function StatChip({ label, value }) {
-  return (
-    <div style={{
-      background: 'var(--bg-card)',
-      border: '1px solid var(--border)',
-      borderRadius: 6,
-      padding: '4px 10px',
-      fontSize: 12,
-      display: 'flex',
-      gap: 6,
-      alignItems: 'center',
-    }}>
-      <span style={{ color: 'var(--text-muted)' }}>{label}:</span>
-      <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono, monospace' }}>{value}</span>
-    </div>
-  )
-}
-
-/* ── Signal bars SVG ── */
-function SignalBars({ strength }) {
-  // strength: -30 (strong) to -90 (weak)
-  const bars = strength >= -50 ? 4 : strength >= -65 ? 3 : strength >= -80 ? 2 : 1
-  return (
-    <svg width="16" height="12" viewBox="0 0 16 12">
-      {[0,1,2,3].map(i => (
-        <rect
-          key={i}
-          x={i * 4 + i}
-          y={12 - (i + 1) * 3}
-          width={3}
-          height={(i + 1) * 3}
-          fill={i < bars ? 'var(--accent-green)' : 'var(--border)'}
-          rx={1}
-        />
-      ))}
-    </svg>
-  )
-}
+/* ── broadcast state lives outside so it doesn't reset on re-render ── */
+let broadcastText = ''
 
 export default function LiveFeedsPage() {
-  const [recorders, setRecorders]     = useState(null)
-  const [loadingRec, setLoadingRec]   = useState(true)
-  const [errorRec, setErrorRec]       = useState(null)
-  const [primaryRec, setPrimaryRec]   = useState(null)
-  const [recentEvents, setRecentEvents] = useState(null)
-  const [loadingEvt, setLoadingEvt]   = useState(true)
-  const [errorEvt, setErrorEvt]       = useState(null)
+  const [recorders, setRecorders]     = useState([])
+  const [selectedId, setSelectedId]   = useState(null)
+  const [loading, setLoading]         = useState(true)
+  const [error, setError]             = useState(null)
+  const [streamError, setStreamError] = useState(false)
   const [nightVision, setNightVision] = useState(false)
-  const [feedStats] = useState({ fps: 24, wifi: '-62dBm', latency: '12ms', nv: 'OFF' })
+  const [detections, setDetections]   = useState([])
+  const [detLoading, setDetLoading]   = useState(false)
+  const [liveBoxes, setLiveBoxes]     = useState([])
+  const [showBroadcast, setShowBroadcast] = useState(false)
+  const [broadcastMsg, setBroadcastMsg]   = useState('')
+  const wsRecRef = useRef(null)
+  const wsDetRef = useRef(null)
+  const boxTimerRef = useRef(null)
 
-  // Fetch recorders
+  const selected = recorders.find(r => r.id === selectedId) || null
+
+  /* ── fetch recorders ── */
   function fetchRecorders() {
-    setLoadingRec(true)
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/recorders`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
+    setLoading(true)
+    fetch('/api/recorders', { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
       .then(d => {
         const list = Array.isArray(d) ? d : (d.recorders || [])
         setRecorders(list)
-        if (list.length > 0 && !primaryRec) setPrimaryRec(list[0])
-        setLoadingRec(false)
+        // auto-select first online
+        const first = list.find(r => r.status === 'online') || list[0]
+        if (first) { setSelectedId(first.id); setNightVision(!!first.night_vision) }
+        setLoading(false)
       })
-      .catch(e => { setErrorRec(String(e)); setLoadingRec(false) })
+      .catch(e => { setError(String(e)); setLoading(false) })
   }
 
-  // Fetch recent events for primary recorder
-  function fetchEvents(recId) {
-    setLoadingEvt(true)
-    const token = sessionStorage.getItem('hs_token')
-    const url = recId
-      ? `${API}/api/detections?recorder_id=${recId}&limit=5`
-      : `${API}/api/detections?limit=5`
-    fetch(url, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
+  /* ── fetch detections for selected recorder ── */
+  function fetchDetections(recId) {
+    if (!recId) return
+    setDetLoading(true)
+    fetch(`/api/detections?recorder_id=${recId}&limit=5`, { credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
       .then(d => {
-        const evts = Array.isArray(d) ? d : (d.detections || d.items || [])
-        setRecentEvents(evts)
-        setLoadingEvt(false)
+        const list = Array.isArray(d) ? d : (d.detections || d.items || [])
+        setDetections(list)
+        setDetLoading(false)
       })
-      .catch(e => { setErrorEvt(String(e)); setLoadingEvt(false) })
+      .catch(() => setDetLoading(false))
   }
 
-  useEffect(() => { fetchRecorders() }, []) // eslint-disable-line
-  useEffect(() => { fetchEvents(primaryRec?.id || primaryRec?.recorder_id) }, [primaryRec]) // eslint-disable-line
+  /* ── WebSocket: recorder status updates ── */
+  function connectRecorderWS() {
+    try {
+      wsRecRef.current = new WebSocket('/ws/recorders')
+      wsRecRef.current.onmessage = ev => {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (msg.type === 'recorder_update') {
+            setRecorders(prev => prev.map(r => r.id === msg.id ? { ...r, ...msg } : r))
+          }
+        } catch {}
+      }
+      wsRecRef.current.onerror = wsRecRef.current.onclose = () => {
+        setTimeout(connectRecorderWS, 3000)
+      }
+    } catch {}
+  }
 
-  const otherRecorders = recorders ? recorders.filter(r =>
-    (r.id || r.recorder_id) !== (primaryRec?.id || primaryRec?.recorder_id)
-  ) : []
+  /* ── WebSocket: live detection boxes ── */
+  function connectDetWS() {
+    try {
+      wsDetRef.current = new WebSocket('/ws/detections')
+      wsDetRef.current.onmessage = ev => {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (msg.recorder_id === selectedId || !msg.recorder_id) {
+            setDetections(prev => [msg, ...prev].slice(0, 5))
+            if (msg.boxes) {
+              setLiveBoxes(msg.boxes)
+              clearTimeout(boxTimerRef.current)
+              boxTimerRef.current = setTimeout(() => setLiveBoxes([]), 3000)
+            }
+          }
+        } catch {}
+      }
+      wsDetRef.current.onerror = wsDetRef.current.onclose = () => {
+        setTimeout(connectDetWS, 3000)
+      }
+    } catch {}
+  }
+
+  useEffect(() => {
+    fetchRecorders()
+    connectRecorderWS()
+    connectDetWS()
+    return () => {
+      try { wsRecRef.current?.close() } catch {}
+      try { wsDetRef.current?.close() } catch {}
+      clearTimeout(boxTimerRef.current)
+    }
+  }, []) // eslint-disable-line
+
+  useEffect(() => { fetchDetections(selectedId) }, [selectedId]) // eslint-disable-line
+
+  /* ── night vision toggle ── */
+  async function toggleNightVision() {
+    const newVal = !nightVision
+    setNightVision(newVal)
+    try {
+      await fetch(`/api/recorders/${selectedId}/night_vision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ enabled: newVal }),
+      })
+    } catch {
+      setNightVision(!newVal)
+    }
+  }
+
+  /* ── select recorder ── */
+  function selectRecorder(id) {
+    const rec = recorders.find(r => r.id === id)
+    setSelectedId(id)
+    setStreamError(false)
+    setNightVision(!!rec?.night_vision)
+  }
+
+  /* ── quick actions ── */
+  async function alertAll() {
+    try {
+      await fetch('/api/alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ type: 'broadcast' }),
+      })
+    } catch {}
+  }
+
+  async function recordAll() {
+    try {
+      await fetch('/api/recording/start_all', { method: 'POST', credentials: 'include' })
+    } catch {}
+  }
+
+  const wifiDbm = selected?.wifi_strength
+  const batPct  = selected?.battery
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Stats strip */}
+      {/* ── STATS STRIP ── */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <StatChip label="FPS" value={feedStats.fps} />
-        <StatChip label="WiFi" value={feedStats.wifi} />
-        <StatChip label="Latency" value={feedStats.latency} />
-        <StatChip label="Night Vision" value={nightVision ? 'ON' : 'OFF'} />
+        <div className="stat-chip">
+          <div className={`status-dot ${selected?.status === 'online' ? 'online' : 'offline'}`} />
+          <span className="value">{selected?.status === 'online' ? 'LIVE' : 'OFFLINE'}</span>
+        </div>
+        <div className="stat-chip">
+          <span style={{ color: 'var(--text-muted)' }}>FPS</span>
+          <span className="value">{selected?.fps ?? '--'}</span>
+        </div>
+        <div className="stat-chip">
+          <span style={{ color: 'var(--text-muted)' }}>WiFi</span>
+          <span className="value" style={{ color: wifiDbm ? wifiColor(wifiDbm) : undefined }}>
+            {wifiDbm ?? '--'} dBm
+          </span>
+        </div>
+        <div className="stat-chip">
+          <span style={{ color: 'var(--text-muted)' }}>Battery</span>
+          <span className="value" style={{ color: batPct != null ? batColor(batPct) : undefined }}>
+            {batPct ?? '--'}%
+          </span>
+        </div>
+        <div className="stat-chip">
+          <span style={{ color: 'var(--text-muted)' }}>Res</span>
+          <span className="value">{selected?.resolution ?? '--'}</span>
+        </div>
+        <div
+          className="stat-chip"
+          style={{ cursor: 'pointer', borderColor: nightVision ? 'var(--accent-green)' : undefined }}
+          onClick={selectedId ? toggleNightVision : undefined}
+        >
+          <span style={{ color: 'var(--text-muted)' }}>Night Vision</span>
+          <span className="value" style={{ color: nightVision ? 'var(--accent-green)' : undefined }}>
+            {nightVision ? 'ON' : 'OFF'}
+          </span>
+        </div>
       </div>
 
-      {/* Main grid */}
+      {/* ── MAIN ROW ── */}
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+
         {/* LEFT: Primary Feed */}
         <div className="panel">
           <div className="panel-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span>Primary Feed</span>
-              <span className="badge badge-green"><div className="live-dot" style={{ width: 5, height: 5 }} />LIVE</span>
+              {selected?.status === 'online' && <div className="live-dot" />}
+              <span style={{ fontWeight: 600 }}>{selected?.real_name || selected?.name || 'No Recorder'}</span>
+              <span className={`badge badge-${selected?.status === 'online' ? 'green' : 'muted'}`}>
+                {selected?.status?.toUpperCase() || 'NONE'}
+              </span>
             </div>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              {primaryRec?.name || primaryRec?.recorder_name || 'REC-01'}
-            </span>
-          </div>
-          <div className="panel-body" style={{ padding: 12 }}>
-            {/* Video area */}
-            <div style={{ position: 'relative', aspectRatio: '16/9', background: '#000', borderRadius: 6, overflow: 'hidden', marginBottom: 10 }}>
-              {primaryRec?.stream_url ? (
-                <video
-                  src={primaryRec.stream_url}
-                  autoPlay muted playsInline
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {selectedId && (
+                <button
                   style={{
-                    width: '100%', height: '100%', objectFit: 'cover',
-                    filter: nightVision ? 'brightness(0.3) hue-rotate(120deg)' : 'none',
-                    transition: 'filter 0.3s',
+                    background: nightVision ? 'rgba(63,185,80,0.15)' : 'var(--bg-elevated)',
+                    border: `1px solid ${nightVision ? 'var(--accent-green)' : 'var(--border)'}`,
+                    borderRadius: 5, padding: '3px 8px', cursor: 'pointer',
+                    color: nightVision ? 'var(--accent-green)' : 'var(--text-muted)',
+                    fontSize: 11, fontWeight: 700, transition: 'all 150ms',
                   }}
+                  onClick={toggleNightVision}
+                >
+                  NV
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div style={{ padding: 0 }}>
+            {/* Video container */}
+            <div className="video-container" style={{ aspectRatio: '16/9' }}>
+              {selected?.status === 'online' && !streamError ? (
+                <img
+                  src={`/api/stream/${selectedId}`}
+                  alt="primary stream"
+                  style={{
+                    width: '100%', height: '100%', objectFit: 'cover', display: 'block',
+                    filter: nightVision
+                      ? 'brightness(0.35) hue-rotate(115deg) saturate(3) contrast(1.2)'
+                      : 'none',
+                    transition: 'filter 0.4s ease',
+                  }}
+                  onError={() => setStreamError(true)}
                 />
               ) : (
-                <div style={{
-                  width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: 'var(--text-muted)', fontSize: 13,
-                }}>
-                  Connecting to {primaryRec?.name || 'REC-01'}…
+                <div className="video-offline">
+                  <VideoOff size={32} color="var(--text-muted)" />
+                  <span>Stream unavailable</span>
+                  <span style={{ fontSize: 11 }}>
+                    {selected?.status === 'offline'
+                      ? 'Recorder is offline'
+                      : 'No recorder selected'}
+                  </span>
                 </div>
               )}
 
-              {/* Overlay info */}
-              <div style={{
-                position: 'absolute', bottom: 10, left: 10,
-                background: 'rgba(13,17,23,0.85)', border: '1px solid var(--border)',
-                borderRadius: 6, padding: '8px 10px', fontSize: 11,
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
-                  <div className="live-dot" />
-                  <span style={{ color: 'var(--accent-green)', fontWeight: 600 }}>LIVE</span>
+              {/* Overlay */}
+              <div className="video-overlay">
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ color: 'white', fontSize: 12, opacity: 0.9 }}>{selected?.location}</span>
+                  <span style={{ color: 'rgba(255,255,255,0.55)', fontSize: 11 }}>{selected?.username}</span>
                 </div>
-                <div style={{ color: 'var(--text-secondary)' }}>
-                  {primaryRec?.name || 'REC-01'} · {primaryRec?.location || 'Gate A'}
-                </div>
-                <div style={{ color: 'var(--text-muted)', marginTop: 2 }}>
-                  1080p · 24fps · 2.1Mbps
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 3 }}>
-                  <SignalBars strength={-62} />
-                  <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>-62dBm</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <WiFiSignalBars dbm={selected?.wifi_strength} size={14} />
+                  <span style={{ color: 'white', fontSize: 11, fontFamily: 'monospace' }}>
+                    {selected?.fps} fps
+                  </span>
                 </div>
               </div>
 
-              {/* Night Vision toggle */}
-              <button
-                style={{
-                  position: 'absolute', top: 10, right: 10,
-                  background: nightVision ? 'rgba(63,185,80,0.25)' : 'rgba(13,17,23,0.75)',
-                  border: `1px solid ${nightVision ? 'var(--accent-green)' : 'var(--border)'}`,
-                  borderRadius: 5, padding: '4px 8px', cursor: 'pointer',
-                  color: nightVision ? 'var(--accent-green)' : 'var(--text-secondary)',
-                  fontSize: 11, fontWeight: 700, letterSpacing: '0.05em',
-                  transition: 'all 150ms',
-                }}
-                onClick={() => setNightVision(v => !v)}
-              >
-                NV
-              </button>
+              {/* Detection boxes */}
+              <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+                {liveBoxes.map((box, i) => {
+                  const borderColor = box.label === 'person' ? '#388bfd'
+                    : box.label === 'vehicle' ? '#d29922' : '#f85149'
+                  return (
+                    <div key={i} style={{
+                      position: 'absolute',
+                      left:   `${box.x * 100}%`,
+                      top:    `${box.y * 100}%`,
+                      width:  `${box.w * 100}%`,
+                      height: `${box.h * 100}%`,
+                      border: `2px solid ${borderColor}`,
+                      borderRadius: 3,
+                      boxSizing: 'border-box',
+                    }}>
+                      <span style={{
+                        position: 'absolute', top: -18, left: 0,
+                        background: borderColor,
+                        color: 'white', fontSize: 9, fontWeight: 700,
+                        padding: '1px 4px', borderRadius: 2, whiteSpace: 'nowrap',
+                      }}>
+                        {box.label} {Math.round((box.confidence || 0) * 100)}%
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
 
-            {/* Recent events sub-panel */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Detections from this feed</div>
-              {loadingEvt ? (
-                <div>{[1,2,3].map(i => <SkeletonRow key={i} />)}</div>
-              ) : errorEvt ? (
-                <ErrorState message={errorEvt} onRetry={() => fetchEvents(primaryRec?.id)} />
-              ) : !recentEvents || recentEvents.length === 0 ? (
-                <div className="empty-state" style={{ padding: '12px 0' }}>
-                  <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No recent detections</div>
+            {/* Recent detections */}
+            <div className="sub-panel" style={{ margin: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span className="sub-panel-title" style={{ margin: 0 }}>Recent Detections</span>
+                <span className="badge badge-muted">{detections.length}</span>
+              </div>
+
+              {detLoading ? (
+                [1, 2, 3].map(i => <div key={i} className="skeleton" style={{ height: 28, marginBottom: 4 }} />)
+              ) : detections.length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: 12, textAlign: 'center', padding: '8px 0' }}>
+                  No detections yet
                 </div>
               ) : (
-                <table className="table">
-                  <tbody>
-                    {recentEvents.map((evt, i) => (
-                      <tr key={evt.id || i}>
-                        <td style={{ color: 'var(--text-muted)', fontSize: 11, width: 70 }}>
-                          {evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : '—'}
-                        </td>
-                        <td>
-                          <span className={`badge badge-${evt.label?.includes('person') ? 'blue' : 'amber'}`}>
-                            {evt.label || evt.class || 'Unknown'}
-                          </span>
-                        </td>
-                        <td style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                          {evt.confidence ? `${Math.round(evt.confidence * 100)}%` : '—'}
-                        </td>
-                        <td>
-                          {!evt.verified && (
-                            <span className="badge badge-red">Unverified</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                detections.map((det, i) => {
+                  const dotColor = det.label === 'person' ? '#388bfd'
+                    : det.label?.includes('vehicle') ? '#d29922' : '#f85149'
+                  return (
+                    <div key={det.id || i} style={{
+                      display: 'flex', gap: 8, alignItems: 'center',
+                      padding: '6px 0', borderBottom: '1px solid var(--border)',
+                    }}>
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />
+                      <span style={{ fontSize: 12 }}>{det.label || det.class || '—'}</span>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {det.confidence ? `${Math.round(det.confidence * 100)}%` : ''}
+                      </span>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                        {det.timestamp ? timeAgo(det.timestamp) : ''}
+                      </span>
+                      <button style={{
+                        fontSize: 10, padding: '2px 6px', borderRadius: 4,
+                        border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+                        color: 'var(--text-muted)', cursor: 'pointer',
+                      }}>
+                        Verify
+                      </button>
+                    </div>
+                  )
+                })
               )}
             </div>
           </div>
         </div>
 
-        {/* RIGHT: Other Recorder Feeds */}
+        {/* RIGHT: Recorder Selection */}
         <div className="panel">
           <div className="panel-header">
-            <span>Other Recorder Feeds</span>
-            <span className="badge badge-muted">{otherRecorders.length}</span>
+            <span>Assigned Recorders</span>
+            <span className="badge badge-muted">{recorders.length}</span>
           </div>
           <div className="panel-body-scroll">
-            {loadingRec ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {[1,2].map(i => <div key={i} className="sub-panel"><div className="skeleton" style={{ height: 80 }} /></div>)}
+            {loading ? (
+              [1, 2, 3].map(i => <SkeletonRecorderCard key={i} />)
+            ) : error ? (
+              <div className="error-state">
+                <div style={{ fontSize: 13, color: 'var(--accent-red)', fontWeight: 600 }}>Failed to load</div>
+                <button className="btn btn-secondary btn-sm" onClick={fetchRecorders}>↺ Retry</button>
               </div>
-            ) : errorRec ? (
-              <ErrorState message={errorRec} onRetry={fetchRecorders} />
-            ) : otherRecorders.length === 0 ? (
+            ) : recorders.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-state-icon">📹</div>
-                <div className="empty-state-title">No other recorders</div>
-                <div className="empty-state-sub">Admin can assign more in GPS Map</div>
+                <div className="empty-state-title">No recorders assigned</div>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {otherRecorders.map(rec => {
-                  const status = rec.status || 'OFFLINE'
-                  return (
-                    <div key={rec.id || rec.recorder_id} className="sub-panel">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <span style={{ fontSize: 12, fontWeight: 500 }}>{rec.name || rec.recorder_name}</span>
-                        <span className={`badge badge-${status === 'ONLINE' ? 'green' : status === 'IDLE' ? 'amber' : 'muted'}`}>
-                          {status}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
-                        {rec.location || 'Unknown Zone'}
-                      </div>
-                      {/* Mini preview */}
-                      <div style={{
-                        height: 60, background: '#000', borderRadius: 4,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: 10, color: 'var(--text-muted)', marginBottom: 6,
-                      }}>
-                        {status === 'ONLINE' ? 'Live Preview' : 'Offline'}
-                      </div>
-                      <button
-                        className="btn btn-secondary btn-xs btn-full"
-                        onClick={() => setPrimaryRec(rec)}
-                      >
-                        Select as Primary
-                      </button>
+              recorders.map(rec => (
+                <div
+                  key={rec.id}
+                  className={`recorder-card${selectedId === rec.id ? ' selected' : ''}`}
+                  onClick={() => selectRecorder(rec.id)}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                    <strong style={{ fontSize: 12 }}>{rec.real_name || rec.name}</strong>
+                    <span className={`badge badge-${rec.status === 'online' ? 'green' : 'muted'}`}>
+                      {rec.status?.toUpperCase() || 'OFFLINE'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>{rec.location}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>FPS:</span>
+                    <span>{rec.fps || '--'}</span>
+                    <WiFiSignalBars dbm={rec.wifi_strength} size={14} />
+                    <BatteryIndicator percent={rec.battery} />
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── BOTTOM ROW ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+
+        {/* All Feeds grid */}
+        <div className="panel">
+          <div className="panel-header">
+            <span>All Feeds</span>
+            <span className="badge badge-muted">{recorders.length}</span>
+          </div>
+          <div className="panel-body">
+            {recorders.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '12px 0' }}>No feeds</div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
+                {recorders.map(rec => (
+                  <div
+                    key={rec.id}
+                    style={{
+                      border: `1px solid ${selectedId === rec.id ? 'var(--accent-blue)' : 'var(--border)'}`,
+                      borderRadius: 6, overflow: 'hidden', cursor: 'pointer',
+                      transition: 'border-color 150ms',
+                    }}
+                    onClick={() => { selectRecorder(rec.id) }}
+                  >
+                    <div style={{ aspectRatio: '16/9', maxHeight: 90, overflow: 'hidden', background: '#000', position: 'relative' }}>
+                      {rec.status === 'online' ? (
+                        <img
+                          src={`/api/stream/${rec.id}`}
+                          alt={rec.real_name || rec.name}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                          onError={e => { e.target.style.display = 'none' }}
+                        />
+                      ) : (
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <VideoOff size={16} color="var(--text-muted)" />
+                        </div>
+                      )}
                     </div>
-                  )
-                })}
+                    <div style={{ padding: '5px 8px', background: 'var(--bg-elevated)' }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {rec.real_name || rec.name}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+                        <div className={`status-dot ${rec.status === 'online' ? 'online' : 'offline'}`} style={{ width: 5, height: 5 }} />
+                        {rec.location}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
         </div>
 
-        {/* BOTTOM ROW */}
-        <div style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          {/* Recorder Status */}
-          <div className="panel">
-            <div className="panel-header">Assigned Recorders Status</div>
-            <div className="panel-body-scroll" style={{ maxHeight: 220 }}>
-              {loadingRec ? (
-                <div>{[1,2,3].map(i => <SkeletonRow key={i} />)}</div>
-              ) : errorRec ? (
-                <ErrorState message={errorRec} onRetry={fetchRecorders} />
-              ) : !recorders || recorders.length === 0 ? (
-                <div className="empty-state" style={{ padding: '16px 0' }}>
-                  <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No recorders assigned</div>
-                </div>
-              ) : (
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Name</th><th>Location</th><th>Battery</th><th>WiFi</th><th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recorders.map(rec => (
-                      <tr key={rec.id || rec.recorder_id}>
-                        <td style={{ fontWeight: 500 }}>{rec.name || rec.recorder_name}</td>
-                        <td style={{ color: 'var(--text-muted)' }}>{rec.location || '—'}</td>
-                        <td style={{ color: 'var(--text-muted)' }}>{rec.battery_pct != null ? `${rec.battery_pct}%` : '—'}</td>
-                        <td style={{ color: 'var(--text-muted)' }}>{rec.wifi_signal || '—'}</td>
-                        <td>
-                          <span className={`badge badge-${rec.status === 'ONLINE' ? 'green' : rec.status === 'IDLE' ? 'amber' : 'muted'}`}>
-                            {rec.status || 'UNKNOWN'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+        {/* Quick Actions */}
+        <div className="panel">
+          <div className="panel-header">Quick Actions</div>
+          <div className="panel-body">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <button className="action-btn" onClick={alertAll}>
+                <Bell size={18} />
+                Alert All
+              </button>
+              <button className="action-btn" onClick={() => setShowBroadcast(v => !v)}>
+                <Radio size={18} />
+                Broadcast
+              </button>
+              <button className="action-btn" onClick={recordAll}>
+                <Video size={18} />
+                Record All
+              </button>
+              <button className="action-btn" onClick={() => { window.location = '/api/detections/export' }}>
+                <Download size={18} />
+                Export Events
+              </button>
             </div>
-          </div>
 
-          {/* Quick Actions */}
-          <div className="panel">
-            <div className="panel-header">Quick Actions</div>
-            <div className="panel-body">
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <button className="btn btn-danger btn-sm">🚨 Alert All Recorders</button>
-                <button className="btn btn-secondary btn-sm">📡 Send Broadcast</button>
-                <button className="btn btn-success btn-sm">⏺ Start Recording All</button>
-                <button className="btn btn-secondary btn-sm">⬇ Export Last Hour</button>
+            {showBroadcast && (
+              <div style={{ marginTop: 12 }}>
+                <textarea
+                  style={{
+                    width: '100%', background: 'var(--bg-base)', border: '1px solid var(--border)',
+                    borderRadius: 6, padding: '8px 10px', color: 'var(--text-primary)',
+                    fontSize: 12, resize: 'vertical', minHeight: 60, boxSizing: 'border-box',
+                  }}
+                  placeholder="Type broadcast message…"
+                  value={broadcastMsg}
+                  onChange={e => setBroadcastMsg(e.target.value)}
+                />
+                <button
+                  className="btn btn-primary btn-sm btn-full"
+                  style={{ marginTop: 6 }}
+                  onClick={async () => {
+                    try {
+                      await fetch('/api/comms/messages', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify({ content: broadcastMsg, broadcast: true }),
+                      })
+                    } catch {}
+                    setBroadcastMsg('')
+                    setShowBroadcast(false)
+                  }}
+                >
+                  Send Broadcast
+                </button>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </div>

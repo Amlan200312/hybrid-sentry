@@ -9,16 +9,21 @@ import MonitorDashboard from './pages/MonitorDashboard'
 import RecorderMobile   from './pages/RecorderMobile'
 import RecorderPC       from './pages/RecorderPC'
 import SentryPortal     from './pages/SentryPortal'
+import RecorderDashboard from './pages/RecorderDashboard'
 import LoadingScreen    from './components/LoadingScreen'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API = '/api'
 
 /* ── Auth guard ──────────────────────────────────────────────── */
 function RequireAuth({ children, allowedRoles }) {
   const token = sessionStorage.getItem('hs_token')
   const role  = sessionStorage.getItem('hs_role')
   if (!token) return <Navigate to="/login" replace />
-  if (allowedRoles && !allowedRoles.includes(role)) return <Navigate to="/select" replace />
+  if (allowedRoles && !allowedRoles.includes(role)) {
+    // redirect to correct destination based on role
+    const dest = (role === 'recorder') ? '/recorder' : '/monitor'
+    return <Navigate to={dest} replace />
+  }
   return children
 }
 
@@ -41,11 +46,14 @@ function AppRoutes() {
           return
         }
         const token = sessionStorage.getItem('hs_token')
+        const role  = sessionStorage.getItem('hs_role')
         const path  = window.location.pathname
         if (!token && path !== '/login' && path !== '/register' && path !== '/setup') {
           navigate('/login', { replace: true })
         } else if (token && (path === '/' || path === '/login')) {
-          navigate('/select', { replace: true })
+          // Role-based redirect
+          if (role === 'recorder') navigate('/recorder', { replace: true })
+          else navigate('/monitor', { replace: true })
         }
       })
       .catch(() => {
@@ -95,10 +103,17 @@ function AppRoutes() {
       } />
       <Route path="/monitor" element={<Navigate to="/dashboard" replace />} />
 
-      {/* Field Recorder — all roles */}
+      {/* Field Recorder — dedicated dashboard for recorder role */}
+      <Route path="/recorder" element={
+        <RequireAuth allowedRoles={['admin', 'monitor', 'recorder']}>
+          <RecorderDashboard />
+        </RequireAuth>
+      } />
+
+      {/* Legacy recorder routes — still work */}
       <Route path="/record/pc" element={
         <RequireAuth allowedRoles={['admin', 'monitor', 'recorder']}>
-          <RecorderPC />
+          <RecorderMobile />
         </RequireAuth>
       } />
       <Route path="/record/mobile" element={
@@ -106,7 +121,6 @@ function AppRoutes() {
           <RecorderMobile />
         </RequireAuth>
       } />
-      <Route path="/recorder"        element={<Navigate to="/record/pc"     replace />} />
       <Route path="/recorder-mobile" element={<Navigate to="/record/mobile" replace />} />
 
       {/* Sentry Portal */}
@@ -118,9 +132,12 @@ function AppRoutes() {
 
       {/* Root fallback */}
       <Route path="/" element={
-        sessionStorage.getItem('hs_token')
-          ? <Navigate to="/select" replace />
-          : <Navigate to="/login" replace />
+        (() => {
+          const token = sessionStorage.getItem('hs_token')
+          const role  = sessionStorage.getItem('hs_role')
+          if (!token) return <Navigate to="/login" replace />
+          return <Navigate to={role === 'recorder' ? '/recorder' : '/monitor'} replace />
+        })()
       } />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

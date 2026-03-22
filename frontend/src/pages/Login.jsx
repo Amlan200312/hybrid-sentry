@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import LoadingScreen from '../components/LoadingScreen'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import config from '../config'
+
 const MAX_PIN = 8
 const LOCKOUT_SECONDS = 4 * 60 + 32
 const SLOW_THRESHOLD_MS = 5000   // show "AI model loading" after 5s
@@ -139,7 +140,7 @@ export default function Login() {
 
   /* Fetch org name + system info */
   useEffect(() => {
-    fetch(`${API}/api/system/info`)
+    fetch(`${config.API_BASE}/api/system/info`)
       .then(r => r.ok ? r.json() : null)
       .then(d => {
         if (d) { setSysInfo(d); if (d.org_name) setOrgName(d.org_name) }
@@ -187,13 +188,13 @@ export default function Login() {
     slowTimerRef.current = setTimeout(() => setSlowWarning(true), SLOW_THRESHOLD_MS)
 
     try {
-      const res = await fetch(`${API}/api/auth/login`, {
+      const res = await fetch(`${config.API_BASE}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ username: username.trim(), pin: pin.join('') }),
       })
-      const data = await res.json()
+      
       clearTimeout(slowTimerRef.current)
 
       if (!res.ok) {
@@ -201,27 +202,41 @@ export default function Login() {
         setAttempts(newAttempts)
         triggerShake()
         setPin([])
+        setLoading(false)
+
         if (newAttempts >= 3) {
           setLockout(true); setLockSeconds(LOCKOUT_SECONDS); setError('')
-        } else {
-          setError(data.detail || 'Invalid username or PIN.')
+          return
         }
-        setLoading(false)
+
+        if (res.status === 401) {
+          setError('Incorrect PIN.')
+        } else if (res.status === 404) {
+          setError('User not found.')
+        } else if (res.status >= 500) {
+          setError('Server error.')
+        } else {
+          const data = await res.json().catch(() => ({}))
+          setError(data.detail || 'Login failed.')
+        }
         return
       }
 
+      const data = await res.json()
       /* ── SUCCESS: flash "ACCESS GRANTED" then navigate ── */
       sessionStorage.setItem('hs_token',        'cookie')
       sessionStorage.setItem('hs_role',         data.role)
       sessionStorage.setItem('hs_username',     data.username)
       sessionStorage.setItem('hs_display_name', data.display_name || data.username)
+      localStorage.setItem('user', JSON.stringify(data))
 
       setGranted(true)
-      setTimeout(() => navigate('/select', { replace: true }), 550)
+      setTimeout(() => navigate('/monitor', { replace: true }), 550)
 
-    } catch {
+    } catch (err) {
       clearTimeout(slowTimerRef.current)
       setServerError(true)
+      setError('Cannot connect to server. Is backend running on port 8000?')
       triggerShake()
       setLoading(false)
     }
@@ -356,7 +371,7 @@ export default function Login() {
         {/* Error states */}
         {serverError && (
           <div style={s.error}>
-            ⚠ Cannot reach server.
+            ⚠ {error || 'Cannot connect to server. Is backend running on port 8000?'}
             <button onClick={handleSubmit} style={{ marginLeft:10, background:'none',
               border:'none', color:'#388bfd', cursor:'pointer', fontSize:13 }}>
               ↺ Retry

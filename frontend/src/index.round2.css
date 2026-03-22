@@ -1,0 +1,161 @@
+
+/* ════════════════════════════════════════════════════════════════
+   ROUND 2 ADDITIONS — append to index.css
+   ════════════════════════════════════════════════════════════════ */
+
+/* Stat chips */
+.stat-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: default;
+}
+.stat-chip .value {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Video */
+.video-container {
+  position: relative;
+  background: #000;
+  overflow: hidden;
+}
+.video-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.video-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.video-offline {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Recorder cards */
+.recorder-card {
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--bg-elevated);
+  transition: all 150ms;
+  margin-bottom: 8px;
+}
+.recorder-card:hover {
+  border-color: #484f58;
+  background: var(--bg-card);
+}
+.recorder-card.selected {
+  border-color: var(--accent-blue);
+  background: rgba(56, 139, 253, 0.08);
+}
+
+/* Action buttons */
+.action-btn {
+  height: 56px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  transition: all 150ms;
+}
+.action-btn:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+
+/* PTT pulsing animation */
+@keyframes pttPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(248, 81, 73, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0); }
+}
+.ptt-active {
+  animation: pttPulse 1s ease-out infinite;
+}
+
+/* Mobile bottom tabs */
+.bottom-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--text-muted);
+  border: none;
+  background: none;
+  padding: 0;
+  transition: all 150ms;
+  border-top: 2px solid transparent;
+}
+.bottom-tab.active {
+  color: var(--accent-blue);
+  background: rgba(56, 139, 253, 0.06);
+  border-top: 2px solid var(--accent-blue);
+}
+
+/* Toggle switch */
+.toggle-track {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  background: var(--border);
+  border-radius: 9px;
+  transition: background 0.2s;
+  display: inline-block;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toggle-track.on {
+  background: var(--accent-blue);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.toggle-track.on .toggle-thumb {
+  transform: translateX(14px);
+}
