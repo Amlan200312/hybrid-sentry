@@ -1,0 +1,56 @@
+# HYBRID SENTRY — Tactical Surveillance Platform
+# ================================================
+# Do NOT commit sensitive keys or database files
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Recordings
+recordings/**/*.mp4
+recordings/**/*.avi
+recordings/**/*.mkv
+recordings/**/*.jpg
+recordings/**/*.png
+!recordings/.gitkeep
+
+# Environment
+.env
+backend/.env
+frontend/.env
+*.env.local
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# YOLO models (large binaries)
+backend/models/*.pt
+backend/models/*.onnx
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,334 @@
+/* HYBRID SENTRY — Military UI System
+   Scanlines, corner brackets, neon effects, animated grid */
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=JetBrains+Mono:wght@300;400;500;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base Reset ───────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  background: #0a0f0a;
+  color: #e8f5e8;
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden;
+}
+
+/* ── Animated Grid Background ────────────────────────────── */
+.grid-bg {
+  position: relative;
+  background-color: #0a0f0a;
+  background-image:
+    linear-gradient(rgba(57,255,20,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(57,255,20,0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: gridMove 20s linear infinite;
+}
+
+@keyframes gridMove {
+  0%   { background-position: 0 0; }
+  100% { background-position: 40px 40px; }
+}
+
+/* ── Scanline Overlay ─────────────────────────────────────── */
+.scanline::after {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.03) 2px,
+    rgba(0,0,0,0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── Corner Brackets ─────────────────────────────────────── */
+.military-card {
+  position: relative;
+  background: #1a2e1a;
+  border: 1px solid #2a4a2a;
+}
+
+.military-card::before {
+  content: '⌐';
+  position: absolute;
+  top: -2px;
+  left: 2px;
+  color: #39ff14;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.military-card::after {
+  content: '¬';
+  position: absolute;
+  bottom: -4px;
+  right: 2px;
+  color: #39ff14;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+/* ── Neon Glow on Active Panel ───────────────────────────── */
+.panel-active {
+  border-color: #39ff14 !important;
+  box-shadow: 0 0 8px #39ff1440, inset 0 0 8px #39ff1408;
+}
+
+/* ── Pulsing Online Indicator ────────────────────────────── */
+.online-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #39ff14;
+  box-shadow: 0 0 6px #39ff14;
+  flex-shrink: 0;
+  animation: pulseDot 2s ease-in-out infinite;
+}
+
+.online-dot.offline { background: #555; box-shadow: none; animation: none; }
+.online-dot.yellow  { background: #ffd700; box-shadow: 0 0 6px #ffd700; }
+.online-dot.red     { background: #ff2020; box-shadow: 0 0 6px #ff2020; }
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px #39ff14; }
+  50%       { opacity: 0.5; box-shadow: 0 0 12px #39ff14, 0 0 20px #39ff14; }
+}
+
+/* ── Green Scan Loading Animation ────────────────────────── */
+.scan-loader {
+  width: 100%;
+  height: 2px;
+  background: #1a7a00;
+  position: relative;
+  overflow: hidden;
+}
+.scan-loader::after {
+  content: '';
+  position: absolute;
+  top: 0; left: -100%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, #39ff14, transparent);
+  animation: scanMove 1.5s linear infinite;
+}
+@keyframes scanMove {
+  0%   { left: -60%; }
+  100% { left: 100%; }
+}
+
+/* ── Blinking Cursor ─────────────────────────────────────── */
+.cursor-blink::after {
+  content: '█';
+  animation: blink 1s step-end infinite;
+  color: #39ff14;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ── Neon Dividers ───────────────────────────────────────── */
+.neon-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #39ff14, transparent);
+  margin: 8px 0;
+  opacity: 0.4;
+}
+
+.neon-divider-h {
+  width: 1px;
+  background: linear-gradient(180deg, transparent, #39ff14, transparent);
+  opacity: 0.4;
+}
+
+/* ── Buttons ─────────────────────────────────────────────── */
+.btn-military {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 6px 14px;
+  border: 1px solid #2a4a2a;
+  background: #111911;
+  color: #7aaa7a;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-military:hover {
+  border-color: #39ff14;
+  color: #39ff14;
+  box-shadow: 0 0 8px #39ff1430;
+}
+.btn-military.active, .btn-military:active {
+  background: #1a2e1a;
+  border-color: #39ff14;
+  color: #39ff14;
+}
+.btn-military.danger:hover {
+  border-color: #ff2020;
+  color: #ff2020;
+  box-shadow: 0 0 8px #ff202030;
+}
+.btn-military.warning:hover {
+  border-color: #ffd700;
+  color: #ffd700;
+}
+
+/* ── HUD Data Readout ────────────────────────────────────── */
+.hud-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  color: #39ff14;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  text-shadow: 0 0 8px #39ff1460;
+}
+
+.hud-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #7aaa7a;
+}
+
+/* ── Sidebar Active Item ─────────────────────────────────── */
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  color: #7aaa7a;
+  transition: all 0.15s;
+  position: relative;
+}
+.sidebar-item:hover {
+  background: #1a2e1a;
+  color: #e8f5e8;
+}
+.sidebar-item.active {
+  border-left-color: #39ff14;
+  background: #1a2e1a;
+  color: #39ff14;
+}
+
+/* ── Progress Bars ───────────────────────────────────────── */
+.progress-bar-wrap {
+  width: 100%;
+  height: 5px;
+  background: #111911;
+  border: 1px solid #2a4a2a;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: #39ff14;
+  box-shadow: 0 0 6px #39ff1460;
+  transition: width 0.5s ease;
+}
+.progress-bar-fill.red    { background: #ff2020; box-shadow: 0 0 6px #ff202060; }
+.progress-bar-fill.yellow { background: #ffd700; box-shadow: 0 0 6px #ffd70060; }
+
+/* ── Badge ───────────────────────────────────────────────── */
+.badge {
+  background: #ff2020;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+/* ── Priority Colors ─────────────────────────────────────── */
+.priority-emergency { color: #ff2020; border-left: 3px solid #ff2020; }
+.priority-high      { color: #ffd700; border-left: 3px solid #ffd700; }
+.priority-medium    { color: #00bfff; border-left: 3px solid #00bfff; }
+.priority-clear     { color: #39ff14; border-left: 3px solid #39ff14; }
+.priority-normal    { color: #7aaa7a; border-left: 3px solid #2a4a2a; }
+
+/* ── Scrollbar ───────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track  { background: #0a0f0a; }
+::-webkit-scrollbar-thumb  { background: #2a4a2a; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #39ff14; }
+
+/* ── Input ───────────────────────────────────────────────── */
+.military-input {
+  background: #0a0f0a;
+  border: 1px solid #2a4a2a;
+  color: #e8f5e8;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  padding: 8px 10px;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+.military-input:focus {
+  border-color: #39ff14;
+  box-shadow: 0 0 8px #39ff1420;
+}
+
+/* ── Threat Level Colors ─────────────────────────────────── */
+.threat-green  { background: #39ff14; }
+.threat-yellow { background: #ffd700; }
+.threat-red    { background: #ff2020; }
+.threat-black  { background: #111; border: 2px solid #ff2020; }
+
+/* ── Fade page transition ─────────────────────────────────── */
+.page-fade { animation: pageFade 0.25s ease; }
+@keyframes pageFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Feed offline overlay ────────────────────────────────── */
+.feed-offline { background: #0a0f0a; border: 1px solid #2a4a2a; }
+
+/* ── PTT Button States ───────────────────────────────────── */
+.ptt-idle      { background: #111911; border: 2px solid #2a4a2a; color: #7aaa7a; }
+.ptt-recording { background: #1a0a0a; border: 2px solid #ff2020; color: #ff2020; }
+.ptt-sending   { background: #1a1500; border: 2px solid #ffd700; color: #ffd700; }
+.ptt-acked     { background: #0a1a0a; border: 2px solid #39ff14; color: #39ff14; }
+
+/* ── Leaflet map dark override ───────────────────────────── */
+.leaflet-container {
+  background: #0a0f0a;
+  font-family: 'JetBrains Mono', monospace;
+}
+.leaflet-popup-content-wrapper {
+  background: #111911;
+  border: 1px solid #2a4a2a;
+  color: #e8f5e8;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+.leaflet-popup-tip { background: #111911; }
+
+/* ── Recharts override ───────────────────────────────────── */
+.recharts-text { fill: #7aaa7a !important; font-family: 'JetBrains Mono'; font-size: 10px; }
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line { stroke: #2a4a2a !important; }
+.recharts-tooltip-wrapper { font-family: 'JetBrains Mono'; font-size: 11px; }

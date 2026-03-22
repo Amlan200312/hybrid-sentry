@@ -1,0 +1,14 @@
+{
+  "python.defaultInterpreterPath": "C:\\Users\\amlan\\AppData\\Roaming\\Python\\Python311\\python.exe",
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.extraPaths": [
+    "C:\\Users\\amlan\\AppData\\Roaming\\Python\\Python311\\site-packages"
+  ],
+  "pyre2.enable": false,
+  "python.analysis.diagnosticMode": "off",
+  "python.analysis.reportMissingImports": "none",
+  "python.analysis.reportMissingModuleSource": "none",
+  "editor.codeActionsOnSave": {},
+  "python.linting.enabled": false,
+  "python.linting.pyre2Enabled": false
+}
