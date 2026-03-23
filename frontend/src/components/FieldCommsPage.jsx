@@ -41,16 +41,23 @@ export default function FieldCommsPage() {
     }
     const d = await res.json().catch(() => ({}))
     const list = Array.isArray(d) ? d : (d.messages || [])
-    setMessages(list)
+    const mapped = list.map(m => ({
+      id: m.id,
+      content: m.text || m.content,
+      sender_id: m.username || m.sender_id,
+      sender_name: m.callsign || m.username || m.sender_name,
+      timestamp: m.timestamp,
+    }))
+    setMessages(mapped.reverse())
     setLoading(false)
   }
 
   async function fetchRecorders() {
-    const res = await authFetch('/api/recorders')
+    const res = await authFetch('/api/users')
     if (!res) return
     const d = await res.json().catch(() => null)
-    const list = d ? (Array.isArray(d) ? d : (d.recorders || [])) : []
-    setRecorders(list)
+    const list = d ? (Array.isArray(d) ? d : (d.users || [])) : []
+    setRecorders(list.filter(u => u.role === 'recorder'))
   }
 
   useEffect(() => {
@@ -58,11 +65,20 @@ export default function FieldCommsPage() {
     fetchRecorders()
     // WebSocket
     try {
-      wsRef.current = authWS('/ws/messages')
+      wsRef.current = authWS('/ws/monitor')
       wsRef.current.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
-          if (msg.type === 'message' || msg.content) {
+          if (msg.type === 'field_message') {
+            const mappedMsg = {
+              id: msg.message_id || Date.now(),
+              content: msg.text,
+              sender_id: msg.username,
+              sender_name: msg.callsign || msg.username,
+              timestamp: msg.timestamp || new Date().toISOString(),
+            }
+            setMessages(prev => [...(prev || []), mappedMsg])
+          } else if (msg.type === 'message' || msg.content) {
             setMessages(prev => [...(prev || []), msg])
           }
         } catch {}
@@ -91,7 +107,7 @@ export default function FieldCommsPage() {
     setMessages(prev => [...(prev || []), optimistic])
     setText('')
     try {
-      await authFetch(`/api/messages`, {
+      await authFetch(`/api/comms/messages`, {
         method: 'POST',
         body: JSON.stringify({ content: optimistic.content, sender_id: myUser }),
       })

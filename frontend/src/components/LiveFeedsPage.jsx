@@ -39,6 +39,15 @@ function LiveFeedsPage() {
 
   const streamUrl = `http://localhost:8000/api/stream/${selectedId}?token=${token}`
 
+  const toggleNV = async () => {
+    const next = !nightVision
+    setNightVision(next)
+    await authFetch(`/api/recorders/${selectedId}/night_vision`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled: next })
+    }).catch(()=>{})
+  }
+
   return (
     <div style={{display:'flex',flexDirection:'column',gap:16}}>
       <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
@@ -47,7 +56,7 @@ function LiveFeedsPage() {
           <span className="value">LIVE</span>
         </div>
         <div className="stat-chip">Stream: <span className="value">{selectedId}</span></div>
-        <div className="stat-chip" style={{cursor:'pointer'}} onClick={() => setNightVision(v => !v)}>
+        <div className="stat-chip" style={{cursor:'pointer'}} onClick={toggleNV}>
           Night Vision: <span className="value" style={{color:nightVision?'#388bfd':undefined}}>
             {nightVision ? 'ON' : 'OFF'}
           </span>

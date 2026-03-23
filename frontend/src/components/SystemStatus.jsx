@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import axios from 'axios'
+import { authFetch } from '../utils/api'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -7,13 +7,21 @@ export default function SystemStatus() {
   const [stats, setStats] = useState(null)
 
   useEffect(() => {
-    const token = sessionStorage.getItem('hs_token')
-    const fetch = () =>
-      axios.get(`${API}/system/stats`, { headers: { Authorization:`Bearer ${token}` } })
-        .then(r => setStats(r.data))
-        .catch(() => setStats({ cpu:42, ram:61, disk:55, temp:48, uptime:'03:21:45', nodes_online:2 }))
-    fetch()
-    const id = setInterval(fetch, 5000)
+    const fetchStats = async () => {
+      try {
+        const res = await authFetch('/api/system/stats')
+        if (res && res.ok) {
+          const data = await res.json()
+          setStats(data)
+        } else {
+          setStats({ cpu:42, ram:61, disk:55, temp:48, uptime:'03:21:45', nodes_online:2 })
+        }
+      } catch (e) {
+        setStats({ cpu:42, ram:61, disk:55, temp:48, uptime:'03:21:45', nodes_online:2 })
+      }
+    }
+    fetchStats()
+    const id = setInterval(fetchStats, 5000)
     return () => clearInterval(id)
   }, [])
 
