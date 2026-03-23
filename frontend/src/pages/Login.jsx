@@ -2,8 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import LoadingScreen from '../components/LoadingScreen'
 
-import config from '../config'
-
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const MAX_PIN = 8
 const LOCKOUT_SECONDS = 4 * 60 + 32
 const SLOW_THRESHOLD_MS = 5000   // show "AI model loading" after 5s
@@ -113,7 +112,7 @@ export default function Login() {
   const navigate = useNavigate()
 
   const [username, setUsername]         = useState('')
-  const [pin, setPin]                   = useState([])
+  const [pin, setPin] = useState('')
   const [showPin, setShowPin]           = useState(false)
   const [loading, setLoading]           = useState(false)
   const [slowWarning, setSlowWarning]   = useState(false)
@@ -138,14 +137,11 @@ export default function Login() {
     if (sessionStorage.getItem('hs_token')) navigate('/select', { replace: true })
   }, [navigate])
 
-  /* Fetch org name + system info */
+  /* Health check */
   useEffect(() => {
-    fetch(`${config.API_BASE}/api/system/info`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        if (d) { setSysInfo(d); if (d.org_name) setOrgName(d.org_name) }
-      })
-      .catch(() => {})
+    fetch('http://localhost:8000/api/system/setup-required')
+      .then(r => { if(r.ok) setServerOk(true) })
+      .catch(() => setServerOk(false))
   }, [])
 
   /* Lockout countdown */
@@ -162,7 +158,7 @@ export default function Login() {
   const handleKey = useCallback((e) => {
     if (lockout || loading) return
     if (e.key >= '0' && e.key <= '9') {
-      setPin(prev => prev.length < MAX_PIN ? [...prev, e.key] : prev)
+      setPin(prev => prev.length < MAX_PIN ? prev + e.key : prev)
     } else if (e.key === 'Backspace') {
       setPin(prev => prev.slice(0, -1))
     } else if (e.key === 'Enter') handleSubmit()
@@ -174,70 +170,29 @@ export default function Login() {
   }, [handleKey])
 
   /* Submit */
-  async function handleSubmit() {
-    if (loading || lockout) return
-    if (!username.trim()) { setError('Enter your username.'); return }
-    if (pin.length === 0)  { setError('Enter your PIN.');     return }
-
-    setError('')
-    setServerError(false)
-    setSlowWarning(false)
+  const handleSubmit = async () => {
+    const pinStr = Array.isArray(pin) ? pin.join('') : pin;
+    if (!username.trim() || !pinStr.trim()) return
     setLoading(true)
-
-    /* Set a "slow model" warning after 5 s */
-    slowTimerRef.current = setTimeout(() => setSlowWarning(true), SLOW_THRESHOLD_MS)
-
+    setError('')
     try {
-      const res = await fetch(`${config.API_BASE}/api/auth/login`, {
+      const res = await fetch('http://localhost:8000/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ username: username.trim(), pin: pin.join('') }),
+        body: JSON.stringify({ username: username.trim(), pin: pinStr.trim() })
       })
-      
-      clearTimeout(slowTimerRef.current)
-
-      if (!res.ok) {
-        const newAttempts = attempts + 1
-        setAttempts(newAttempts)
-        triggerShake()
-        setPin([])
-        setLoading(false)
-
-        if (newAttempts >= 3) {
-          setLockout(true); setLockSeconds(LOCKOUT_SECONDS); setError('')
-          return
-        }
-
-        if (res.status === 401) {
-          setError('Incorrect PIN.')
-        } else if (res.status === 404) {
-          setError('User not found.')
-        } else if (res.status >= 500) {
-          setError('Server error.')
-        } else {
-          const data = await res.json().catch(() => ({}))
-          setError(data.detail || 'Login failed.')
-        }
-        return
-      }
-
       const data = await res.json()
-      /* ── SUCCESS: flash "ACCESS GRANTED" then navigate ── */
-      sessionStorage.setItem('hs_token',        'cookie')
-      sessionStorage.setItem('hs_role',         data.role)
-      sessionStorage.setItem('hs_username',     data.username)
-      sessionStorage.setItem('hs_display_name', data.display_name || data.username)
-      localStorage.setItem('user', JSON.stringify(data))
-
-      setGranted(true)
-      setTimeout(() => navigate('/monitor', { replace: true }), 550)
-
-    } catch (err) {
-      clearTimeout(slowTimerRef.current)
-      setServerError(true)
-      setError('Cannot connect to server. Is backend running on port 8000?')
-      triggerShake()
+      if (res.ok) {
+        localStorage.setItem('user', JSON.stringify(data))
+        localStorage.setItem('token', data.access_token)
+        if (data.role === 'recorder') window.location.href = '/recorder'
+        else window.location.href = '/monitor'
+      } else {
+        setError(typeof data.detail === 'string' ? data.detail : 'Login failed')
+      }
+    } catch {
+      setError('Cannot reach server. Start backend first.')
+    } finally {
       setLoading(false)
     }
   }
@@ -371,14 +326,18 @@ export default function Login() {
         {/* Error states */}
         {serverError && (
           <div style={s.error}>
-            ⚠ {error || 'Cannot connect to server. Is backend running on port 8000?'}
+            ⚠ Cannot reach server.
             <button onClick={handleSubmit} style={{ marginLeft:10, background:'none',
               border:'none', color:'#388bfd', cursor:'pointer', fontSize:13 }}>
               ↺ Retry
             </button>
           </div>
         )}
-        {error && !lockout && !serverError && <div style={s.error}>{error}</div>}
+        {error && !lockout && !serverError && (
+          <div style={{color:'#f85149',fontSize:12,marginTop:8,textAlign:'center'}}>
+            {typeof error === 'string' ? error : 'Login failed'}
+          </div>
+        )}
         {lockout && (
           <div style={s.lockout}>⚠ Too many attempts. Try again in {fmtLock(lockSeconds)}</div>
         )}

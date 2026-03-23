@@ -36,7 +36,7 @@ export default function FieldCommsPage() {
   function fetchMessages() {
     setLoading(true)
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/comms/messages?limit=50`, {
+    fetch(`http://localhost:8000/api/comms/messages?limit=50`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })
@@ -51,7 +51,7 @@ export default function FieldCommsPage() {
 
   function fetchRecorders() {
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/recorders`, {
+    fetch(`http://localhost:8000/api/recorders`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })
@@ -101,7 +101,7 @@ export default function FieldCommsPage() {
     setMessages(prev => [...(prev || []), optimistic])
     setText('')
     try {
-      await fetch(`${API}/api/comms/messages`, {
+      await fetch(`http://localhost:8000/api/comms/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

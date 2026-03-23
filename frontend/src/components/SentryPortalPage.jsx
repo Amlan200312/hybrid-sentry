@@ -40,7 +40,7 @@ export default function SentryPortalPage() {
 
   useEffect(() => {
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/recorders`, {
+    fetch(`http://localhost:8000/api/recorders`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })
@@ -57,7 +57,7 @@ export default function SentryPortalPage() {
     setSending(true)
     const token = sessionStorage.getItem('hs_token')
     try {
-      await fetch(`${API}/api/servo/move`, {
+      await fetch(`http://localhost:8000/api/servo/move`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -74,7 +74,7 @@ export default function SentryPortalPage() {
     setTestResult('running')
     const token = sessionStorage.getItem('hs_token')
     try {
-      await fetch(`${API}/api/servo/test`, {
+      await fetch(`http://localhost:8000/api/servo/test`, {
         method: 'POST',
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         credentials: 'include',

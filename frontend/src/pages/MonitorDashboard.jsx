@@ -60,9 +60,9 @@ export default function MonitorDashboard() {
     const token = sessionStorage.getItem('hs_token')
     const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
     Promise.all([
-      fetch(`${API}/api/detections/verify-queue`, { headers: hdrs, credentials: 'include' })
+      fetch(`http://localhost:8000/api/detections/verify-queue`, { headers: hdrs, credentials: 'include' })
         .then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${API}/api/comms/messages?unacked=true&limit=50`, { headers: hdrs, credentials: 'include' })
+      fetch(`http://localhost:8000/api/comms/messages?unacked=true&limit=50`, { headers: hdrs, credentials: 'include' })
         .then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([vq, msgs]) => {
       setBadges({
@@ -84,17 +84,10 @@ export default function MonitorDashboard() {
     if (v === 'field-comms')  setBadges(p => ({ ...p, comms:  0 }))
   }
 
-  async function logout() {
-    const token = sessionStorage.getItem('hs_token')
-    try {
-      await fetch(`${API}/api/auth/logout`, {
-        method: 'DELETE',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        credentials: 'include',
-      })
-    } catch {}
-    sessionStorage.clear()
-    navigate('/login')
+  const logout = () => {
+    localStorage.removeItem('user')
+    localStorage.removeItem('token')
+    window.location.href = '/login'
   }
 
   function renderPage() {

@@ -74,22 +74,22 @@ export default function RecorderDashboard() {
   useEffect(() => {
     const hdrs = { credentials: 'include' }
 
-    fetch('/api/users/me', hdrs)
+    fetch('http://localhost:8000/api/users/me', hdrs)
       .then(r => r.ok ? r.json() : null).then(d => { if (d) setProfile(d) }).catch(() => {})
 
-    fetch('/api/recorders/self', hdrs)
+    fetch('http://localhost:8000/api/recorders/self', hdrs)
       .then(r => r.ok ? r.json() : null).then(d => { if (d) { setSelfRec(d); setStreaming(!!d.streaming); setNightVision(!!d.night_vision) } }).catch(() => {})
 
-    fetch('/api/health', hdrs)
+    fetch('http://localhost:8000/api/health', hdrs)
       .then(r => r.ok ? r.json() : null).then(d => setHealth(d)).catch(() => {})
 
-    fetch('/api/comms/messages?limit=40', hdrs)
+    fetch('http://localhost:8000/api/comms/messages?limit=40', hdrs)
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d) setMessages(Array.isArray(d) ? d : (d.messages || [])) }).catch(() => {})
 
     // WS: detections
     try {
-      wsDetRef.current = new WebSocket('/ws/detections')
+      wsDetRef.current = new WebSocket('ws://localhost:8000/ws/detections')
       wsDetRef.current.onmessage = ev => {
         try {
           const msg = JSON.parse(ev.data)
@@ -100,7 +100,7 @@ export default function RecorderDashboard() {
 
     // WS: comms
     try {
-      wsCommsRef.current = new WebSocket('/ws/messages')
+      wsCommsRef.current = new WebSocket('ws://localhost:8000/ws/messages')
       wsCommsRef.current.onmessage = ev => {
         try {
           const msg = JSON.parse(ev.data)
@@ -134,7 +134,7 @@ export default function RecorderDashboard() {
     const next = !nightVision
     setNightVision(next)
     try {
-      await fetch('/api/recorders/self/night_vision', {
+      await fetch('http://localhost:8000/api/recorders/self/night_vision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -145,7 +145,7 @@ export default function RecorderDashboard() {
 
   async function applySettings() {
     try {
-      await fetch('/api/recorders/self/settings', {
+      await fetch('http://localhost:8000/api/recorders/self/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -165,7 +165,7 @@ export default function RecorderDashboard() {
     const txt = msgText
     setMsgText('')
     try {
-      await fetch('/api/comms/messages', {
+      await fetch('http://localhost:8000/api/comms/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -176,11 +176,11 @@ export default function RecorderDashboard() {
 
   async function pttStart() {
     setPttActive(true)
-    try { await fetch('/api/ptt/start', { method: 'POST', credentials: 'include' }) } catch {}
+    try { await fetch('http://localhost:8000/api/ptt/start', { method: 'POST', credentials: 'include' }) } catch {}
   }
   async function pttStop() {
     setPttActive(false)
-    try { await fetch('/api/ptt/stop', { method: 'POST', credentials: 'include' }) } catch {}
+    try { await fetch('http://localhost:8000/api/ptt/stop', { method: 'POST', credentials: 'include' }) } catch {}
   }
 
   async function getLocation() {
@@ -193,7 +193,7 @@ export default function RecorderDashboard() {
           const d = await r.json()
           const addr = d.display_name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`
           setLocationText(addr)
-          await fetch('/api/recorders/self/location', {
+          await fetch('http://localhost:8000/api/recorders/self/location', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -208,11 +208,11 @@ export default function RecorderDashboard() {
   }
 
   async function sendCheckin() {
-    try { await fetch('/api/recorders/self/checkin', { method: 'POST', credentials: 'include' }) } catch {}
+    try { await fetch('http://localhost:8000/api/recorders/self/checkin', { method: 'POST', credentials: 'include' }) } catch {}
   }
 
   async function logout() {
-    try { await fetch('/api/auth/logout', { method: 'DELETE', credentials: 'include' }) } catch {}
+    try { await fetch('http://localhost:8000/api/auth/logout', { method: 'DELETE', credentials: 'include' }) } catch {}
     sessionStorage.clear()
     navigate('/login')
   }
@@ -518,7 +518,7 @@ export default function RecorderDashboard() {
           </div>
           <button
             className="btn btn-secondary btn-sm"
-            onClick={() => fetch('/api/health', { credentials: 'include' }).then(r => r.json()).then(d => setHealth(d)).catch(() => setHealth(null))}
+            onClick={() => fetch('http://localhost:8000/api/health', { credentials: 'include' }).then(r => r.json()).then(d => setHealth(d)).catch(() => setHealth(null))}
           >
             Test Connection
           </button>
@@ -570,7 +570,7 @@ export default function RecorderDashboard() {
             style={{ marginTop: 6 }}
             onClick={async () => {
               try {
-                await fetch('/api/recorders/self/location', {
+                await fetch('http://localhost:8000/api/recorders/self/location', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   credentials: 'include',

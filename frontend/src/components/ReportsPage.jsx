@@ -20,7 +20,7 @@ export default function ReportsPage() {
 
   useEffect(() => {
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/reports`, {
+    fetch(`http://localhost:8000/api/reports`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })
@@ -39,7 +39,7 @@ export default function ReportsPage() {
     const id = setInterval(() => setProgress(p => Math.min(p + 10, 90)), 400)
     const token = sessionStorage.getItem('hs_token')
     try {
-      const r = await fetch(`${API}/api/reports/pdf`, {
+      const r = await fetch(`http://localhost:8000/api/reports/pdf`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

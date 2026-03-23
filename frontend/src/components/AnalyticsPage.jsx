@@ -51,9 +51,9 @@ export default function AnalyticsPage() {
     const token = sessionStorage.getItem('hs_token')
     const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
     Promise.all([
-      fetch(`${API}/api/analytics/timeline`, { headers: hdrs, credentials: 'include' })
+      fetch(`http://localhost:8000/api/analytics/timeline`, { headers: hdrs, credentials: 'include' })
         .then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${API}/api/detections?limit=200`, { headers: hdrs, credentials: 'include' })
+      fetch(`http://localhost:8000/api/detections?limit=200`, { headers: hdrs, credentials: 'include' })
         .then(r => r.ok ? r.json() : null).catch(() => null),
     ]).then(([tl, dets]) => {
       setTimeline(tl)

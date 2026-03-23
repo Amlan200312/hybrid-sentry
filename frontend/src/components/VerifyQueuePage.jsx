@@ -37,7 +37,7 @@ export default function VerifyQueuePage() {
   function fetchQueue() {
     setLoading(true)
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/detections/verify-queue`, {
+    fetch(`http://localhost:8000/api/detections/verify-queue`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })
@@ -55,7 +55,7 @@ export default function VerifyQueuePage() {
     setDoing(p => ({ ...p, [id]: verdict }))
     const token = sessionStorage.getItem('hs_token')
     try {
-      await fetch(`${API}/api/detections/${id}/verify`, {
+      await fetch(`http://localhost:8000/api/detections/${id}/verify`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

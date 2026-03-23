@@ -1,6 +1,4 @@
-const config = {
-  API_BASE: '',        // empty = use Vite proxy (same origin /api/...)
-  WS_BASE: '',         // empty = use Vite proxy (same origin /ws/...)
-}
-
-export default config
+const API = 'http://localhost:8000'
+const WS = 'ws://localhost:8000'
+export { API, WS }
+export default { API, WS }

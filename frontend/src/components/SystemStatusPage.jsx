@@ -42,10 +42,10 @@ export default function SystemStatusPage() {
     const token = sessionStorage.getItem('hs_token')
     const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
     Promise.all([
-      fetch(`${API}/api/health`,  { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${API}/api/system/hardware`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`${API}/api/recorders`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${API}/api/logs?limit=20`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch(`http://localhost:8000/api/health`,  { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`http://localhost:8000/api/system/hardware`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`http://localhost:8000/api/recorders`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch(`http://localhost:8000/api/logs?limit=20`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
     ]).then(([h, hw, recs, lg]) => {
       setHealth(h)
       setHardware(hw)

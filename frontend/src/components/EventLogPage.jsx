@@ -36,7 +36,7 @@ export default function EventLogPage() {
     setLoading(true)
     const token = sessionStorage.getItem('hs_token')
     const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
-    fetch(`${API}/api/detections?limit=50`, { headers: hdrs, credentials: 'include' })
+    fetch(`http://localhost:8000/api/detections?limit=50`, { headers: hdrs, credentials: 'include' })
       .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
       .then(d => {
         const list = Array.isArray(d) ? d : (d.detections || d.items || [])

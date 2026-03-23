@@ -25,7 +25,7 @@ export default function GalleryPage() {
   function fetchSnapshots() {
     setLoading(true)
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/snapshots`, {
+    fetch(`http://localhost:8000/api/snapshots`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })

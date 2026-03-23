@@ -41,9 +41,9 @@ export default function GPSMapPage() {
     const token = sessionStorage.getItem('hs_token')
     const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
     Promise.all([
-      fetch(`${API}/api/recorders`, { headers: hdrs, credentials: 'include' })
+      fetch(`http://localhost:8000/api/recorders`, { headers: hdrs, credentials: 'include' })
         .then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`${API}/api/weather`, { headers: hdrs, credentials: 'include' })
+      fetch(`http://localhost:8000/api/weather`, { headers: hdrs, credentials: 'include' })
         .then(r => r.ok ? r.json() : null).catch(() => null),
     ]).then(([recs, w]) => {
       const list = Array.isArray(recs) ? recs : (recs.recorders || [])

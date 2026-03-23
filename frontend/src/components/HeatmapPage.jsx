@@ -64,7 +64,7 @@ export default function HeatmapPage() {
   function fetchData() {
     setLoading(true)
     const token = sessionStorage.getItem('hs_token')
-    fetch(`${API}/api/detections?limit=500`, {
+    fetch(`http://localhost:8000/api/detections?limit=500`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       credentials: 'include',
     })

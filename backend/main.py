@@ -62,7 +62,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -389,46 +394,11 @@ class RegisterRequest(BaseModel):
 # AUTH ENDPOINTS
 # ─────────────────────────────────────────
 @app.post("/api/auth/login")
-async def login(req: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-    ip = request.client.host or ""
-    ua = request.headers.get("User-Agent", "")
-
-    result = authenticate_user(db, req.username, req.pin, ip=ip, device_info=ua)
-
-    # Set httpOnly cookie
-    response.set_cookie(
-        key="access_token",
-        value=result["access_token"],
-        httponly=True,
-        samesite="lax",
-        max_age=8 * 3600,
-        path="/",
-    )
-
-    # Determine device type
-    ua_lower = ua.lower()
-    is_mobile = any(m in ua_lower for m in ["mobile", "android", "iphone", "ipad"])
-
-    # Get callsign for user
-    user_obj = db.query(User).filter(User.username == result["username"]).first()
-    callsign = ""
-    if user_obj:
-        callsign = user_obj.callsign or ""
-        if not callsign:
-            try:
-                callsign = get_callsign_for_recorder(db, result["username"])
-            except Exception:
-                callsign = result["username"].upper()
-
-    return {
-        "success": True,
-        "username": result["username"],
-        "role": result["role"],
-        "display_name": result["display_name"],
-        "operator_id": result["operator_id"],
-        "callsign": callsign,
-        "is_mobile": is_mobile,
-    }
+async def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    from auth import authenticate_user
+    ip = request.client.host if request.client else ""
+    result = authenticate_user(db, req.username, req.pin, ip=ip)
+    return result
 
 
 @app.post("/api/auth/logout")
