@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 
+import { authFetch } from '../utils/api'
 const API = 'http://localhost:8000'
 
 function SkeletonCard() {
@@ -24,12 +25,8 @@ export default function GalleryPage() {
 
   function fetchSnapshots() {
     setLoading(true)
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`http://localhost:8000/api/snapshots`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+    authFetch(`/api/snapshots`)
+      .then(r => r ? r.json() : Promise.reject('No response'))
       .then(d => {
         const list = Array.isArray(d) ? d : (d.snapshots || [])
         setSnapshots(list)

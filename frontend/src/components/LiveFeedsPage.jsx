@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { authFetch, authWS } from '../utils/api'
 
 function LiveFeedsPage() {
   const [recorders, setRecorders] = useState([])
@@ -11,10 +12,8 @@ function LiveFeedsPage() {
   const token = localStorage.getItem('token')
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/recorders', {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-    .then(r => r.json())
+    authFetch('/api/recorders')
+    .then(r => r ? r.json() : [])
     .then(data => {
       const list = Array.isArray(data) ? data : []
       setRecorders(list)
@@ -25,7 +24,7 @@ function LiveFeedsPage() {
   }, [])
 
   useEffect(() => {
-    const ws = new WebSocket(`ws://localhost:8000/ws/detections?token=${token}`)
+    const ws = authWS('/ws/detections')
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data)

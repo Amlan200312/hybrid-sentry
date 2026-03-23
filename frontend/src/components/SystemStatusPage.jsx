@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 
-const API = 'http://localhost:8000'
+import { authFetch, authWS } from '../utils/api'
 
 function StatusIndicator({ ok, label }) {
   return (
@@ -38,21 +38,23 @@ export default function SystemStatusPage() {
   const [logs, setLogs]             = useState([])
   const [wsStatus, setWsStatus]     = useState('connecting')
 
-  const fetchAll = useCallback(() => {
-    const token = sessionStorage.getItem('hs_token')
-    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
-    Promise.all([
-      fetch(`http://localhost:8000/api/health`,  { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`http://localhost:8000/api/system/hardware`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`http://localhost:8000/api/recorders`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`http://localhost:8000/api/logs?limit=20`, { headers: hdrs, credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
-    ]).then(([h, hw, recs, lg]) => {
-      setHealth(h)
-      setHardware(hw)
-      const list = Array.isArray(recs) ? recs : (recs?.recorders || [])
-      setRecorders(list)
+  const fetchAll = useCallback(async () => {
+    const [hRes, hwRes, rRes, lRes] = await Promise.all([
+      authFetch('/api/system/setup-required'),
+      authFetch('/api/system/hardware'),
+      authFetch('/api/recorders'),
+      authFetch('/api/logs?limit=20')
+    ])
+    if (hRes) setHealth(await hRes.json().catch(()=>null))
+    if (hwRes) setHardware(await hwRes.json().catch(()=>null))
+    if (rRes) {
+      const recs = await rRes.json().catch(()=>[])
+      setRecorders(Array.isArray(recs) ? recs : (recs?.recorders || []))
+    }
+    if (lRes) {
+      const lg = await lRes.json().catch(()=>[])
       setLogs(Array.isArray(lg) ? lg : (lg?.logs || []))
-    })
+    }
   }, [])
 
   useEffect(() => {
@@ -65,7 +67,7 @@ export default function SystemStatusPage() {
   useEffect(() => {
     let ws
     try {
-      ws = new WebSocket('ws://localhost:8000/ws/detections')
+      ws = authWS('/ws/detections')
       ws.onopen  = () => setWsStatus('connected')
       ws.onerror = () => setWsStatus('error')
       ws.onclose = () => setWsStatus('disconnected')

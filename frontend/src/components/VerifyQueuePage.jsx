@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 
+import { authFetch } from '../utils/api'
 const API = 'http://localhost:8000'
 
 function SkeletonCard() {
@@ -36,12 +37,8 @@ export default function VerifyQueuePage() {
 
   function fetchQueue() {
     setLoading(true)
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`http://localhost:8000/api/detections/verify-queue`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+    authFetch(`/api/detections/verify-queue`)
+      .then(r => r ? r.json() : Promise.reject('No response'))
       .then(d => {
         setPending(Array.isArray(d) ? d : (d.detections || d.items || []))
         setLoading(false)
@@ -53,15 +50,9 @@ export default function VerifyQueuePage() {
 
   async function verifyItem(id, verdict) {
     setDoing(p => ({ ...p, [id]: verdict }))
-    const token = sessionStorage.getItem('hs_token')
     try {
-      await fetch(`http://localhost:8000/api/detections/${id}/verify`, {
+      await authFetch(`/api/detections/${id}/verify`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        credentials: 'include',
         body: JSON.stringify({ verdict }),
       })
     } catch {}

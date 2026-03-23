@@ -4,6 +4,7 @@ import {
   XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts'
 
+import { authFetch } from '../utils/api'
 const API = 'http://localhost:8000'
 const COLORS = ['#388bfd', '#3fb950', '#d29922', '#f85149', '#a371f7']
 
@@ -48,13 +49,11 @@ export default function AnalyticsPage() {
 
   function fetchAll() {
     setLoading(true); setError(null)
-    const token = sessionStorage.getItem('hs_token')
-    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
     Promise.all([
-      fetch(`http://localhost:8000/api/analytics/timeline`, { headers: hdrs, credentials: 'include' })
-        .then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(`http://localhost:8000/api/detections?limit=200`, { headers: hdrs, credentials: 'include' })
-        .then(r => r.ok ? r.json() : null).catch(() => null),
+      authFetch(`/api/analytics/timeline`)
+        .then(r => r ? r.json() : null).catch(() => null),
+      authFetch(`/api/detections?limit=200`)
+        .then(r => r ? r.json() : null).catch(() => null),
     ]).then(([tl, dets]) => {
       setTimeline(tl)
       if (dets) {

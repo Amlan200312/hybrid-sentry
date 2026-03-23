@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 
+import { authFetch } from '../utils/api'
 const API = 'http://localhost:8000'
 
 const YOLO_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
@@ -39,12 +40,8 @@ export default function SentryPortalPage() {
   const [testResult, setTestResult] = useState(null)
 
   useEffect(() => {
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`http://localhost:8000/api/recorders`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then(r => r.ok ? r.json() : null)
+    authFetch(`/api/recorders`)
+      .then(r => r ? r.json() : null)
       .then(d => {
         const list = d ? (Array.isArray(d) ? d : (d.recorders || [])) : []
         setRecorders(list)
@@ -55,15 +52,9 @@ export default function SentryPortalPage() {
 
   async function sendServo(p, t) {
     setSending(true)
-    const token = sessionStorage.getItem('hs_token')
     try {
-      await fetch(`http://localhost:8000/api/servo/move`, {
+      await authFetch(`/api/servo/move`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        credentials: 'include',
         body: JSON.stringify({ pan: p, tilt: t, recorder_id: selRec }),
       })
     } catch {}
@@ -72,12 +63,9 @@ export default function SentryPortalPage() {
 
   async function runServoTest() {
     setTestResult('running')
-    const token = sessionStorage.getItem('hs_token')
     try {
-      await fetch(`http://localhost:8000/api/servo/test`, {
+      await authFetch(`/api/servo/test`, {
         method: 'POST',
-        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        credentials: 'include',
       })
       setTestResult('ok')
     } catch {

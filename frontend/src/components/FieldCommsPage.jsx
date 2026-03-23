@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-const API = 'http://localhost:8000'
-const WS_URL = 'ws://localhost:8000/ws/messages'
+import { authFetch, authWS, getUser } from '../utils/api'
 
 function Avatar({ name, size = 28 }) {
   const initials = (name || '?').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
@@ -30,37 +29,28 @@ export default function FieldCommsPage() {
   const bottomRef = useRef(null)
   const wsRef = useRef(null)
 
-  const myUser = sessionStorage.getItem('hs_username') || 'monitor'
-  const myName = sessionStorage.getItem('hs_display_name') || 'Monitor'
+  const myUser = getUser()?.username || 'monitor'
+  const myName = getUser()?.display_name || 'Monitor'
 
-  function fetchMessages() {
+  async function fetchMessages() {
     setLoading(true)
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`http://localhost:8000/api/comms/messages?limit=50`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
-      .then(d => {
-        const list = Array.isArray(d) ? d : (d.messages || [])
-        setMessages(list)
-        setLoading(false)
-      })
-      .catch(e => { setError(String(e)); setLoading(false) })
+    const res = await authFetch('/api/comms/messages?limit=50')
+    if (!res) {
+      setLoading(false)
+      return
+    }
+    const d = await res.json().catch(() => ({}))
+    const list = Array.isArray(d) ? d : (d.messages || [])
+    setMessages(list)
+    setLoading(false)
   }
 
-  function fetchRecorders() {
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`http://localhost:8000/api/recorders`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        const list = d ? (Array.isArray(d) ? d : (d.recorders || [])) : []
-        setRecorders(list)
-      })
-      .catch(() => {})
+  async function fetchRecorders() {
+    const res = await authFetch('/api/recorders')
+    if (!res) return
+    const d = await res.json().catch(() => null)
+    const list = d ? (Array.isArray(d) ? d : (d.recorders || [])) : []
+    setRecorders(list)
   }
 
   useEffect(() => {
@@ -68,7 +58,7 @@ export default function FieldCommsPage() {
     fetchRecorders()
     // WebSocket
     try {
-      wsRef.current = new WebSocket(WS_URL)
+      wsRef.current = authWS('/ws/messages')
       wsRef.current.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
@@ -101,13 +91,8 @@ export default function FieldCommsPage() {
     setMessages(prev => [...(prev || []), optimistic])
     setText('')
     try {
-      await fetch(`http://localhost:8000/api/comms/messages`, {
+      await authFetch(`/api/messages`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        credentials: 'include',
         body: JSON.stringify({ content: optimistic.content, sender_id: myUser }),
       })
     } catch {}

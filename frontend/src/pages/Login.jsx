@@ -186,6 +186,7 @@ export default function Login() {
         localStorage.setItem('user', JSON.stringify(data))
         localStorage.setItem('token', data.access_token)
         if (data.role === 'recorder') window.location.href = '/recorder'
+        else if (data.role === 'admin') window.location.href = '/role-select'
         else window.location.href = '/monitor'
       } else {
         setError(typeof data.detail === 'string' ? data.detail : 'Login failed')

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 
+import { authFetch } from '../utils/api'
 const API = 'http://localhost:8000'
 
 function SkeletonRow() {
@@ -34,10 +35,8 @@ export default function EventLogPage() {
 
   function fetchEvents() {
     setLoading(true)
-    const token = sessionStorage.getItem('hs_token')
-    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
-    fetch(`http://localhost:8000/api/detections?limit=50`, { headers: hdrs, credentials: 'include' })
-      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+    authFetch(`/api/detections?limit=50`)
+      .then(r => r ? r.json() : Promise.reject('No response'))
       .then(d => {
         const list = Array.isArray(d) ? d : (d.detections || d.items || [])
         setEvents(list)

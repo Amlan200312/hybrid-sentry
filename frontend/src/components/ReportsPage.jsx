@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 
+import { authFetch } from '../utils/api'
 const API = 'http://localhost:8000'
 
 export default function ReportsPage() {
@@ -19,12 +20,8 @@ export default function ReportsPage() {
   const [loadingReports, setLoadingReports] = useState(true)
 
   useEffect(() => {
-    const token = sessionStorage.getItem('hs_token')
-    fetch(`http://localhost:8000/api/reports`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      credentials: 'include',
-    })
-      .then(r => r.ok ? r.json() : null)
+    authFetch(`/api/reports`)
+      .then(r => r ? r.json() : null)
       .then(d => {
         setPrevReports(d ? (Array.isArray(d) ? d : (d.reports || [])) : [])
         setLoadingReports(false)
@@ -37,15 +34,9 @@ export default function ReportsPage() {
     setProgress(0)
     // Simulate progress
     const id = setInterval(() => setProgress(p => Math.min(p + 10, 90)), 400)
-    const token = sessionStorage.getItem('hs_token')
     try {
-      const r = await fetch(`http://localhost:8000/api/reports/pdf`, {
+      const r = await authFetch(`/api/reports/pdf`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        credentials: 'include',
         body: JSON.stringify({
           type: reportType,
           date_from: dateFrom,
@@ -55,7 +46,7 @@ export default function ReportsPage() {
       })
       clearInterval(id)
       setProgress(100)
-      if (r.ok) {
+      if (r) {
         const blob = await r.blob()
         const url  = URL.createObjectURL(blob)
         const a    = document.createElement('a')

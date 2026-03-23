@@ -3,6 +3,7 @@ import Login from './pages/Login'
 import Register from './pages/Register'
 import MonitorDashboard from './pages/MonitorDashboard'
 import RecorderDashboard from './pages/RecorderDashboard'
+import RoleSelect from './pages/RoleSelect'
 
 const ProtectedRoute = ({ children }) => {
   const user = localStorage.getItem('user')
@@ -19,6 +20,7 @@ function App() {
         <Route path="/register" element={<Register />} />
         <Route path="/monitor" element={<ProtectedRoute><MonitorDashboard /></ProtectedRoute>} />
         <Route path="/recorder" element={<ProtectedRoute><RecorderDashboard /></ProtectedRoute>} />
+        <Route path="/role-select" element={<ProtectedRoute><RoleSelect /></ProtectedRoute>} />
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
