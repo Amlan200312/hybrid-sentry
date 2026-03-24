@@ -16,9 +16,9 @@ export default function RecorderProfilePage({ isMobile }) {
       navigator.geolocation.getCurrentPosition(async (pos) => {
         const { latitude, longitude } = pos.coords
         setLocation(`${latitude.toFixed(5)}, ${longitude.toFixed(5)}`)
-        await authFetch('/api/recorders/self/location', {
+        await authFetch('/api/gps/positions', {
           method: 'POST',
-          body: JSON.stringify({ lat: latitude, lng: longitude })
+          body: JSON.stringify({ latitude, longitude })
         }).catch(()=>{})
         setUpdating(false)
       }, () => setUpdating(false))
@@ -26,7 +26,7 @@ export default function RecorderProfilePage({ isMobile }) {
   }
 
   const handleCheckIn = async () => {
-    await authFetch('/api/ptt/checkin', { method: 'POST' }).catch(()=>{})
+    await authFetch('/api/gps/checkin', { method: 'POST' }).catch(()=>{})
   }
 
   const handleLogout = () => {
@@ -100,8 +100,8 @@ export default function RecorderProfilePage({ isMobile }) {
               </button>
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <input className="input" placeholder="Manual Input (Lat, Lng)" style={{ flex: 1, height: 36 }} />
-              <button className="btn btn-primary">Save</button>
+              <input className="input" placeholder="Manual Input (Lat, Lng)" style={{ flex: 1, height: isMobile ? 48 : 36 }} />
+              <button className="btn btn-primary" style={{ height: isMobile ? 48 : undefined }}>Save</button>
             </div>
           </div>
         </div>
@@ -109,13 +109,13 @@ export default function RecorderProfilePage({ isMobile }) {
         <div className="panel">
           <div className="panel-header">Account Actions</div>
           <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button className="btn btn-primary" style={{ height: 38 }} onClick={handleCheckIn}>
+            <button className="btn btn-primary" style={{ height: isMobile ? 48 : 38 }} onClick={handleCheckIn}>
               ✓ Send Check-In
             </button>
-            <button className="btn btn-secondary" style={{ height: 38 }}>
+            <button className="btn btn-secondary" style={{ height: isMobile ? 48 : 38 }}>
               🔑 Change PIN
             </button>
-            <button className="btn btn-secondary" style={{ height: 38, borderColor: '#f85149', color: '#f85149' }} onClick={handleLogout}>
+            <button className="btn btn-secondary" style={{ height: isMobile ? 48 : 38, borderColor: '#f85149', color: '#f85149' }} onClick={handleLogout}>
               Logout
             </button>
           </div>

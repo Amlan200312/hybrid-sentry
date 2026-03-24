@@ -74,7 +74,7 @@ export default function RecorderSidebar({ view, setView, badges = {}, onLogout }
 
   useEffect(() => {
     authFetch('/api/messages?unacked=true&limit=50').then(r => r ? r.json() : [])
-      .then(msgs => setCommsCount(Array.isArray(msgs) ? msgs.length : (msgs?.count || 0)))
+      .then(msgs => setCommsCount(Array.isArray(msgs) ? msgs.length : (msgs?.items || msgs?.data || []).length))
       .catch(() => {})
   }, [])
 

@@ -16,13 +16,11 @@ const ProtectedRoute = ({ children }) => {
 
 const RecorderEntry = () => {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
-
   useEffect(() => {
-    const cb = () => setIsMobile(window.innerWidth < 768)
-    window.addEventListener('resize', cb)
-    return () => window.removeEventListener('resize', cb)
+    const h = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', h)
+    return () => window.removeEventListener('resize', h)
   }, [])
-
   return isMobile ? <MobileRecorderDashboard /> : <RecorderDashboard />
 }
 

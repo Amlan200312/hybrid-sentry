@@ -19,7 +19,7 @@ export default function RecorderCommsPage({ isMobile }) {
 
   useEffect(() => {
     async function load() {
-      const resMsg = await authFetch('/api/messages?limit=50').catch(()=>{})
+      const resMsg = await authFetch('/api/comms/my-messages?limit=50').catch(()=>{})
       if (resMsg && resMsg.ok) {
         const data = await resMsg.json().catch(()=>({}))
         const list = Array.isArray(data) ? data : (data.messages || [])
@@ -41,7 +41,7 @@ export default function RecorderCommsPage({ isMobile }) {
     load()
 
     try {
-      wsRef.current = authWS('/ws/messages')
+      wsRef.current = authWS('/ws/monitor')
       wsRef.current.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
@@ -74,21 +74,15 @@ export default function RecorderCommsPage({ isMobile }) {
     }
     setMessages(prev => [...prev, optimistic])
     setText('')
-    await authFetch('/api/messages', {
+    await authFetch('/api/comms/messages', {
       method: 'POST', body: JSON.stringify({ content: optimistic.content, sender_id: myUser })
     }).catch(()=>{})
     setSending(false)
   }
 
-  const handlePttStart = async () => {
-    setPttActive(true)
-    await authFetch('/api/ptt/start', { method: 'POST' }).catch(()=>{})
-  }
-
-  const handlePttStop = async () => {
-    setPttActive(false)
-    await authFetch('/api/ptt/stop', { method: 'POST' }).catch(()=>{})
-  }
+  // PTT requires hardware mic relay — disabled in web client
+  const handlePttStart = () => {}
+  const handlePttStop = () => {}
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '2fr 1fr', gap: 16, height: isMobile ? '100%' : 'calc(100vh - 120px)' }}>
@@ -155,33 +149,23 @@ export default function RecorderCommsPage({ isMobile }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
         <div className="panel">
           <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px 12px' }}>
-            <style>
-              {`
-                @keyframes pttRing {
-                  0% { box-shadow: 0 0 0 0 rgba(248,81,73,0.5) }
-                  70% { box-shadow: 0 0 0 16px rgba(248,81,73,0) }
-                  100% { box-shadow: 0 0 0 0 rgba(248,81,73,0) }
-                }
-              `}
-            </style>
             <button
               style={{
                 width: 88, height: 88, borderRadius: '50%',
-                background: pttActive ? '#f85149' : '#1c2128',
-                border: `2px solid ${pttActive ? '#f85149' : '#30363d'}`,
-                color: pttActive ? '#fff' : 'var(--text-primary)',
+                background: '#1c2128',
+                border: '2px solid #30363d',
+                color: '#4a5568',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32,
-                cursor: 'pointer', transition: 'all 0.15s',
-                animation: pttActive ? 'pttRing 1.5s infinite' : 'none'
+                cursor: 'not-allowed', transition: 'all 0.15s',
               }}
-              onMouseDown={handlePttStart} onMouseUp={handlePttStop} onMouseLeave={() => pttActive && handlePttStop()}
-              onTouchStart={handlePttStart} onTouchEnd={handlePttStop}
+              disabled
             >
               🎙️
             </button>
             <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 12, fontWeight: 600, letterSpacing: '0.05em' }}>
-              {pttActive ? 'TRANSMITTING...' : 'HOLD TO TALK'}
+              PTT NOT AVAILABLE
             </div>
+            <div style={{ fontSize: 9, color: '#4a5568', marginTop: 4, textAlign: 'center' }}>Hardware relay required</div>
           </div>
         </div>
 
@@ -200,14 +184,15 @@ export default function RecorderCommsPage({ isMobile }) {
               <button 
                 className="btn btn-secondary" 
                 style={{ flex: 1, borderColor: '#f85149', color: '#f85149' }}
-                onClick={() => authFetch('/api/alerts', { method: 'POST', body: JSON.stringify({ message: broadcast }) }).catch(()=>{})}
+                onClick={() => authFetch('/api/comms/alert', { method: 'POST', body: JSON.stringify({ type: 'emergency' }) }).catch(()=>{})}
               >
                 🚨 Alert All
               </button>
               <button 
                 className="btn btn-secondary" 
                 style={{ flex: 1, borderColor: '#388bfd', color: '#388bfd' }}
-                onClick={() => authFetch('/api/messages/broadcast', { method: 'POST', body: JSON.stringify({ message: broadcast }) }).catch(()=>{})}
+                onClick={() => { if (broadcast.trim()) authFetch('/api/comms/messages', { method: 'POST', body: JSON.stringify({ content: broadcast, broadcast: true }) }).catch(()=>{}); setBroadcast('') }}
+                disabled={!broadcast.trim()}
               >
                 📢 Msg All
               </button>

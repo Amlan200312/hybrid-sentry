@@ -40,16 +40,29 @@ export default function SystemStatusPage() {
 
   const fetchAll = useCallback(async () => {
     const [hRes, hwRes, rRes, lRes] = await Promise.all([
-      authFetch('/api/system/setup-required'),
+      authFetch('/api/system/info'),
       authFetch('/api/system/hardware'),
-      authFetch('/api/recorders'),
+      authFetch('/api/users'),
       authFetch('/api/logs?limit=20')
     ])
-    if (hRes) setHealth(await hRes.json().catch(()=>null))
+    if (hRes) {
+      const data = await hRes.json().catch(()=>null)
+      // /api/system/info returns {platform, ai_loaded, org_name, camera_online, ...}
+      // Add a pseudo status field for the health indicator
+      if (data) setHealth({ ...data, status: 'ok' })
+    }
     if (hwRes) setHardware(await hwRes.json().catch(()=>null))
     if (rRes) {
-      const recs = await rRes.json().catch(()=>[])
-      setRecorders(Array.isArray(recs) ? recs : (recs?.recorders || []))
+      const users = await rRes.json().catch(()=>[])
+      const arr = Array.isArray(users) ? users : []
+      // Filter only recorders for the "Active Recorders" panel
+      const recs = arr.filter(u => u.role === 'recorder')
+      setRecorders(recs.map(u => ({
+        id: u.id,
+        name: u.display_name || u.username,
+        status: 'ONLINE',  // no real-time status; assume online if in user list
+        cpu_pct: 0, memory_pct: 0, disk_pct: 0,
+      })))
     }
     if (lRes) {
       const lg = await lRes.json().catch(()=>[])

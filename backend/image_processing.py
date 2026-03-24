@@ -16,30 +16,33 @@ from typing import Optional, Tuple, List
 # ─────────────────────────────────────────
 def night_vision(frame: np.ndarray) -> np.ndarray:
     """
-    Software-only night vision: CLAHE on luminance + green tint.
-    Grayscale → CLAHE(3.0, 8x8) → denoise → sharpen → green channel tint.
-    NO hardware light required.
+    Lightweight night vision: LAB conversion → equalize L channel → BGR → boost green x1.2
+    Processes every other frame to maintain FPS on RPi.
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if not hasattr(night_vision, '_frame_counter'):
+        night_vision._frame_counter = 0
+    night_vision._frame_counter += 1
 
-    # CLAHE adaptive histogram equalization
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
+    # Only process every 2nd frame — return cached result on skipped frames
+    if night_vision._frame_counter % 2 == 0:
+        if hasattr(night_vision, '_last_result') and night_vision._last_result is not None:
+            return night_vision._last_result
 
-    # Denoise
-    denoised = cv2.fastNlMeansDenoising(enhanced, h=10, templateWindowSize=7, searchWindowSize=21)
+    # LAB conversion -> Equalize L channel -> Back to BGR
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l_eq = cv2.equalizeHist(l)
+    lab_eq = cv2.merge((l_eq, a, b))
+    bgr_eq = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
 
-    # Sharpen
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-    sharpened = cv2.filter2D(denoised, -1, kernel)
+    # Multiply green channel by 1.2
+    out = bgr_eq.astype(np.float32)
+    out[:, :, 1] = np.clip(out[:, :, 1] * 1.2, 0, 255)
 
-    # Apply green channel tint: use green channel most, reduce red/blue
-    output = np.zeros((frame.shape[0], frame.shape[1], 3), dtype=np.uint8)
-    output[:, :, 0] = (sharpened * 0.2).astype(np.uint8)   # Blue: dim
-    output[:, :, 1] = sharpened                              # Green: full
-    output[:, :, 2] = (sharpened * 0.15).astype(np.uint8)  # Red: very dim
+    result = out.astype(np.uint8)
+    night_vision._last_result = result
+    return result
 
-    return output
 
 
 # ─────────────────────────────────────────
@@ -366,7 +369,8 @@ class ImagePipeline:
         self._frame_count = 0
 
         # Toggle flags
-        self.night_mode = False
+        self._night_mode = False
+        self._night_manual = False  # True = user set manually, skip auto
         self.flow_mode = False
         self.edges_mode = False
         self.bgsub_mode = False
@@ -379,6 +383,15 @@ class ImagePipeline:
 
         self.auto_night = True
         self._auto_night_check_interval = 10   # every N frames
+
+    @property
+    def night_mode(self) -> bool:
+        return self._night_mode
+
+    @night_mode.setter
+    def night_mode(self, value: bool):
+        self._night_mode = value
+        self._night_manual = True  # Mark as manually controlled
 
     @property
     def motion_regions(self) -> List[Tuple[int, int, int, int]]:
@@ -401,12 +414,12 @@ class ImagePipeline:
 
         orig = frame.copy()
 
-        # Auto lighting check every N frames
-        if self.auto_night and self._frame_count % self._auto_night_check_interval == 0:
+        # Auto lighting check every N frames (skipped if user manually set night mode)
+        if self.auto_night and not self._night_manual and self._frame_count % self._auto_night_check_interval == 0:
             if should_auto_night_vision(frame):
-                self.night_mode = True
+                self._night_mode = True
             else:
-                self.night_mode = False
+                self._night_mode = False
 
         out = frame.copy()
 

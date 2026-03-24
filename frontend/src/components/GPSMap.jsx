@@ -115,7 +115,7 @@ export default function GPSMap() {
   /* Map state */
   const [tileKey, setTileKey] = useState('dark')
   const [layers, setLayers] = useState({
-    recorders: true, zones: true, detections: true, messages: true,
+    recorders: true, zones: true, detections: true, messages: true, weather: false,
   })
 
   /* Recorder positions (WebSocket) */
@@ -280,6 +280,23 @@ export default function GPSMap() {
     finally { setSaving(false) }
   }
 
+  async function assignGps(recorder) {
+    const monitor = window.prompt(`Enter Monitor Username to assign to ${recorder}:`)
+    if (!monitor) return
+    try {
+      const r = await fetch(`${API}/api/gps/assign`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionStorage.getItem('hs_token') || ''}`,
+        },
+        body: JSON.stringify({ recorder_username: recorder, monitor_username: monitor })
+      })
+      if (r.ok) alert('Assigned successfully')
+      else alert('Failed to assign')
+    } catch (e) { alert('Error: ' + e) }
+  }
+
   /* ── Styles ──────────────────────────────────────────────────── */
   const st = {
     wrap: { height: '100%', position: 'relative', fontFamily: "'Inter', sans-serif" },
@@ -397,6 +414,9 @@ export default function GPSMap() {
             setPlacing(false)
           }}
         />
+        {layers.weather && (
+          <TileLayer url={`${API}/api/weather/tiles/{z}/{x}/{y}`} opacity={0.6} zIndex={10} />
+        )}
 
         {/* ── Recorder markers ── */}
         {layers.recorders && nodes.map((n, i) => {
@@ -414,6 +434,13 @@ export default function GPSMap() {
                       {n.streaming ? '● Streaming' : '● Online'}
                     </span>
                   </div>
+                  {isAdmin && (
+                    <div style={{ marginTop: 10 }}>
+                      <button onClick={() => assignGps(n.name)} style={{ background: '#21262d', border: '1px solid #30363d', color: '#e6edf3', borderRadius: 4, padding: '4px 10px', fontSize: 11, cursor: 'pointer', width: '100%' }}>
+                        Assign to Monitor
+                      </button>
+                    </div>
+                  )}
                 </div>
               </Popup>
             </Marker>
@@ -501,6 +528,7 @@ export default function GPSMap() {
             { key: 'zones',     label: '🗺 Zones' },
             { key: 'detections',label: '🔴 Detections' },
             { key: 'messages',  label: '💬 Messages' },
+            { key: 'weather',   label: '☁️ Weather' },
           ].map(({ key, label }) => (
             <button key={key} style={st.layerBtn(layers[key])} onClick={() => toggleLayer(key)}>{label}</button>
           ))}

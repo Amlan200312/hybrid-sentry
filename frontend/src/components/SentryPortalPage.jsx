@@ -1,11 +1,7 @@
-import { useState, useEffect } from 'react'
-
+import { useState, useEffect, useRef } from 'react'
 import { authFetch } from '../utils/api'
-const API = 'http://localhost:8000'
 
 const YOLO_MODELS = ['yolov8n', 'yolov8s', 'yolov8m', 'yolov8l', 'yolov8x']
-const RESOLUTIONS = ['640x480', '1280x720', '1920x1080']
-const FPS_OPTIONS = [15, 24, 30]
 
 function Slider({ label, min, max, value, onChange, unit = '' }) {
   return (
@@ -17,6 +13,8 @@ function Slider({ label, min, max, value, onChange, unit = '' }) {
       <input
         type="range" min={min} max={max} value={value}
         onChange={e => onChange(Number(e.target.value))}
+        onMouseUp={e => onChange(Number(e.target.value), true)}
+        onTouchEnd={e => onChange(Number(e.target.value), true)}
         style={{
           width: '100%', accentColor: 'var(--accent-blue)',
           background: 'var(--bg-elevated)', height: 4, borderRadius: 2,
@@ -27,51 +25,53 @@ function Slider({ label, min, max, value, onChange, unit = '' }) {
 }
 
 export default function SentryPortalPage() {
-  const [recorders, setRecorders]   = useState([])
-  const [selRec, setSelRec]         = useState('')
-  const [pan, setPan]               = useState(0)
-  const [tilt, setTilt]             = useState(0)
-  const [yoloModel, setYoloModel]   = useState('yolov8n')
-  const [sensitivity, setSensitivity] = useState(50)
-  const [resolution, setResolution] = useState('1280x720')
-  const [fps, setFps]               = useState(24)
-  const [autoRecord, setAutoRecord] = useState(false)
-  const [sending, setSending]       = useState(false)
+  const [tab, setTab] = useState('camera')
+
+  // Data states
+  const [cameras, setCameras] = useState([])
+  const [users, setUsers] = useState([])
+  const [config, setConfig] = useState({})
+  
+  // Camera specific states
+  const [selRec, setSelRec] = useState('')
+  const [pan, setPan] = useState(0)
+  const [tilt, setTilt] = useState(0)
+  const [sending, setSending] = useState(false)
   const [testResult, setTestResult] = useState(null)
+  
+  const timerRef = useRef(null)
 
-  useEffect(() => {
-    authFetch(`/api/recorders`)
-      .then(r => r ? r.json() : null)
-      .then(d => {
-        const list = d ? (Array.isArray(d) ? d : (d.recorders || [])) : []
-        setRecorders(list)
-        if (list.length > 0) setSelRec(list[0].id || list[0].recorder_id || '')
-      })
-      .catch(() => {})
-  }, [])
+  useEffect(() => { loadData() }, [tab])
 
-  async function sendServo(p, t) {
-    setSending(true)
+  async function loadData() {
     try {
-      await authFetch(`/api/servo/move`, {
-        method: 'POST',
-        body: JSON.stringify({ pan: p, tilt: t, recorder_id: selRec }),
-      })
+      if (tab === 'camera') {
+        const r = await authFetch('/api/cameras')
+        if (r?.ok) {
+          const list = await r.json()
+          setCameras(list)
+          if (list.length > 0 && !selRec) setSelRec(list[0].camera_id)
+        }
+      } else if (tab === 'user') {
+        const r = await authFetch('/api/users')
+        if (r?.ok) setUsers(await r.json())
+      } else if (tab === 'system') {
+        const r = await authFetch('/api/system/config')
+        if (r?.ok) setConfig(await r.json())
+      }
     } catch {}
-    setSending(false)
   }
 
-  async function runServoTest() {
-    setTestResult('running')
-    try {
-      await authFetch(`/api/servo/test`, {
+  // --- SERVO COMMANDS ---
+  async function sendServo(p, t) {
+    setSending(true)
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => {
+      authFetch('/api/sensors/servo', {
         method: 'POST',
-      })
-      setTestResult('ok')
-    } catch {
-      setTestResult('error')
-    }
-    setTimeout(() => setTestResult(null), 3000)
+        body: JSON.stringify({ pan: p, tilt: t, recorder_id: selRec }),
+      }).finally(() => setSending(false))
+    }, 300)
   }
 
   function moveStep(axis, dir) {
@@ -84,150 +84,167 @@ export default function SentryPortalPage() {
     }
   }
 
+  async function runServoTest() {
+    setTestResult('running')
+    try {
+      const r = await authFetch('/api/servo/test', { method: 'POST' })
+      setTestResult(r.ok ? 'ok' : 'error')
+    } catch { setTestResult('error') }
+    setTimeout(() => setTestResult(null), 3000)
+  }
+
+  // --- USER MGT ---
+  async function handleResetPin(username) {
+    if (!window.confirm(`Reset PIN to 0000 for ${username}?`)) return
+    try {
+      const r = await authFetch('/api/users/admin-reset-pin', {
+        method: 'POST',
+        body: JSON.stringify({ username, new_pin: '0000' })
+      })
+      if (r.ok) alert('PIN reset to 0000.')
+      else alert('Failed to reset PIN.')
+    } catch (e) { alert('Error: ' + e) }
+  }
+
+  async function handleDeleteUser(username) {
+    if (!window.confirm(`Delete user ${username}?`)) return
+    try {
+      const r = await authFetch(`/api/users/${username}`, { method: 'DELETE' })
+      if (r.ok) setUsers(u => u.filter(user => user.username !== username))
+      else alert('Failed to delete user.')
+    } catch (e) { alert('Error: ' + e) }
+  }
+
+  // --- SYSTEM MGT ---
+  async function handleSaveConfig(key, value) {
+    setConfig(prev => ({ ...prev, [key]: value }))
+    try {
+      await authFetch('/api/system/config', {
+        method: 'PUT',
+        body: JSON.stringify({ [key]: value })
+      })
+    } catch (e) { alert('Failed to save system config.') }
+  }
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-      {/* LEFT: Camera Control */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div className="panel">
-          <div className="panel-header">Camera Control</div>
-          <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {/* Recorder selector */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Select Recorder</div>
-              <select
-                className="input-field"
-                value={selRec}
-                onChange={e => setSelRec(e.target.value)}
-              >
-                {recorders.length === 0 ? (
-                  <option value="">No recorders</option>
-                ) : (
-                  recorders.map(rec => (
-                    <option key={rec.id || rec.recorder_id} value={rec.id || rec.recorder_id}>
-                      {rec.name || rec.recorder_name}
-                    </option>
-                  ))
-                )}
-              </select>
-            </div>
-
-            {/* Servo controls */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Servo Controls</div>
-              <Slider label="Pan" min={-90} max={90} value={pan} onChange={v => { setPan(v); sendServo(v, tilt) }} unit="°" />
-              <Slider label="Tilt" min={-45} max={45} value={tilt} onChange={v => { setTilt(v); sendServo(pan, v) }} unit="°" />
-
-              {/* Arrow buttons */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginTop: 10 }}>
-                <div />
-                <button className="btn btn-secondary btn-sm" onClick={() => moveStep('tilt', 1)}>▲</button>
-                <div />
-                <button className="btn btn-secondary btn-sm" onClick={() => moveStep('pan', -1)}>◀</button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => { setPan(0); setTilt(0); sendServo(0, 0) }}
-                  title="Center"
-                >
-                  ⊙
-                </button>
-                <button className="btn btn-secondary btn-sm" onClick={() => moveStep('pan', 1)}>▶</button>
-                <div />
-                <button className="btn btn-secondary btn-sm" onClick={() => moveStep('tilt', -1)}>▼</button>
-                <div />
-              </div>
-              {sending && (
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'center', marginTop: 6 }}>
-                  Sending…
-                </div>
-              )}
-            </div>
-
-            {/* Stream settings */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Stream Settings</div>
-              <div style={{ marginBottom: 10 }}>
-                <label className="input-label">Resolution</label>
-                <select className="input-field" value={resolution} onChange={e => setResolution(e.target.value)}>
-                  {RESOLUTIONS.map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {FPS_OPTIONS.map(f => (
-                  <button
-                    key={f}
-                    className={`filter-pill ${fps === f ? 'active' : ''}`}
-                    onClick={() => setFps(f)}
-                  >
-                    {f} FPS
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, height: '100%', maxWidth: 800, margin: '0 auto', width: '100%' }}>
+      {/* TABS */}
+      <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border)', paddingBottom: 12 }}>
+        <button className={`btn ${tab==='camera'?'btn-primary':'btn-ghost'}`} onClick={()=>setTab('camera')}>📹 Camera Management</button>
+        <button className={`btn ${tab==='user'?'btn-primary':'btn-ghost'}`} onClick={()=>setTab('user')}>👥 User Management</button>
+        <button className={`btn ${tab==='system'?'btn-primary':'btn-ghost'}`} onClick={()=>setTab('system')}>⚙️ System Config</button>
       </div>
 
-      {/* RIGHT: System Control */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div className="panel">
-          <div className="panel-header">System Control</div>
-          <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {/* YOLO model */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">YOLO Model</div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {YOLO_MODELS.map(m => (
-                  <button
-                    key={m}
-                    className={`filter-pill ${yoloModel === m ? 'active' : ''}`}
-                    onClick={() => setYoloModel(m)}
-                  >
-                    {m}
-                  </button>
-                ))}
+      <div style={{ overflowY: 'auto' }}>
+        {tab === 'camera' && (
+          <div className="panel">
+            <div className="panel-header">Camera Control</div>
+            <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="sub-panel">
+                <div className="sub-panel-title">Select Camera / Recorder</div>
+                <select className="input-field" value={selRec} onChange={e => setSelRec(e.target.value)}>
+                  {cameras.length === 0 ? <option value="">No cameras</option> : cameras.map(c => (
+                    <option key={c.camera_id} value={c.camera_id}>{c.display_name} ({c.camera_id})</option>
+                  ))}
+                </select>
               </div>
-            </div>
 
-            {/* Sensitivity */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Detection Sensitivity</div>
-              <Slider label="Confidence Threshold" min={10} max={90} value={sensitivity} onChange={setSensitivity} unit="%" />
-              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                Lower = more detections, Higher = fewer false positives
+              <div className="sub-panel">
+                <div className="sub-panel-title">Servo Controls</div>
+                <Slider label="Pan" min={-90} max={90} value={pan} onChange={(v, done) => { setPan(v); if(done) sendServo(v, tilt) }} unit="°" />
+                <Slider label="Tilt" min={-45} max={45} value={tilt} onChange={(v, done) => { setTilt(v); if(done) sendServo(pan, v) }} unit="°" />
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginTop: 10, maxWidth: 300, margin: '10px auto 0' }}>
+                  <div />
+                  <button className="btn btn-secondary btn-sm" onClick={() => moveStep('tilt', 1)}>▲</button>
+                  <div />
+                  <button className="btn btn-secondary btn-sm" onClick={() => moveStep('pan', -1)}>◀</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => { setPan(0); setTilt(0); sendServo(0, 0) }}>⊙</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => moveStep('pan', 1)}>▶</button>
+                  <div />
+                  <button className="btn btn-secondary btn-sm" onClick={() => moveStep('tilt', -1)}>▼</button>
+                  <div />
+                </div>
+                {sending && <div style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'center', marginTop: 6 }}>Sending…</div>}
               </div>
-            </div>
 
-            {/* Auto record */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Recording Settings</div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <label className="toggle">
-                  <input type="checkbox" checked={autoRecord} onChange={e => setAutoRecord(e.target.checked)} />
-                  <span className="toggle-slider" />
-                </label>
-                <span style={{ fontSize: 13 }}>Auto-record on detection</span>
-              </label>
-            </div>
-
-            {/* Servo test */}
-            <div className="sub-panel">
-              <div className="sub-panel-title">Servo Test</div>
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={runServoTest}
-                disabled={testResult === 'running'}
-              >
-                {testResult === 'running' ? <><div className="spinner" />Testing…</> : '⚙ Run Servo Test'}
-              </button>
-              {testResult === 'ok' && (
-                <span style={{ fontSize: 12, color: 'var(--accent-green)', marginLeft: 8 }}>✓ Test passed</span>
-              )}
-              {testResult === 'error' && (
-                <span style={{ fontSize: 12, color: 'var(--accent-red)', marginLeft: 8 }}>✗ Test failed</span>
-              )}
+              <div className="sub-panel">
+                <div className="sub-panel-title">Servo Test</div>
+                <button className="btn btn-secondary btn-sm" onClick={runServoTest} disabled={testResult === 'running'}>
+                  {testResult === 'running' ? 'Testing…' : '⚙ Run Calibration Test'}
+                </button>
+                {testResult === 'ok' && <span style={{ fontSize: 12, color: 'var(--accent-green)', marginLeft: 8 }}>✓ Passed</span>}
+                {testResult === 'error' && <span style={{ fontSize: 12, color: 'var(--accent-red)', marginLeft: 8 }}>✗ Failed</span>}
+              </div>
             </div>
           </div>
-        </div>
+        )}
+
+        {tab === 'user' && (
+          <div className="panel">
+            <div className="panel-header">User Accounts</div>
+            <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {users.map(u => (
+                <div key={u.username} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 12, background: 'var(--bg-elevated)', borderRadius: 8 }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{u.display_name}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>@{u.username} • {u.role}</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-sm btn-secondary" onClick={() => handleResetPin(u.username)}>Reset PIN</button>
+                    <button className="btn btn-sm btn-danger" onClick={() => handleDeleteUser(u.username)}>Delete</button>
+                  </div>
+                </div>
+              ))}
+              {users.length === 0 && <div className="empty-state">No users fetched.</div>}
+            </div>
+          </div>
+        )}
+
+        {tab === 'system' && (
+          <div className="panel">
+            <div className="panel-header">System Settings</div>
+            <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="sub-panel">
+                <div className="sub-panel-title">YOLO Model</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {YOLO_MODELS.map(m => (
+                    <button
+                      key={m}
+                      className={`filter-pill ${config.yolo_model === m ? 'active' : ''}`}
+                      onClick={() => handleSaveConfig('yolo_model', m)}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="sub-panel">
+                <div className="sub-panel-title">Detection Sensitivity</div>
+                <Slider 
+                  label="Confidence Threshold" 
+                  min={10} max={90} 
+                  value={Number(config.detection_confidence || 50)} 
+                  onChange={(v, done) => { if(done) handleSaveConfig('detection_confidence', v); else setConfig(c => ({...c, detection_confidence: v})) }} 
+                  unit="%" 
+                />
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Higher = fewer false positives</div>
+              </div>
+
+              <div className="sub-panel">
+                <div className="sub-panel-title">Global Auto-Record</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <label className="toggle">
+                    <input type="checkbox" checked={config.auto_record === 'true'} onChange={e => handleSaveConfig('auto_record', e.target.checked ? 'true' : 'false')} />
+                    <span className="toggle-slider" />
+                  </label>
+                  <span style={{ fontSize: 13 }}>Capture video clips on confirmed detections</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -7,11 +7,18 @@ export default function RecorderLiveStreamPage({ isMobile }) {
   const [detections, setDetections] = useState([])
   const [liveBoxes, setLiveBoxes] = useState([])
   const wsRef = useRef(null)
+  const [streamStats] = useState({ fps: 24 })
 
   const user = getUser()
   const username = user?.display_name || user?.username || 'Operator'
 
   useEffect(() => {
+    // Fetch initial night vision state from backend
+    authFetch('/api/feeds/processing/CAM-01')
+      .then(r => r?.json())
+      .then(data => { if (data?.night_mode != null) setNv(data.night_mode) })
+      .catch(() => {})
+
     try {
       wsRef.current = authWS('/ws/detections')
       wsRef.current.onmessage = (ev) => {
@@ -21,8 +28,8 @@ export default function RecorderLiveStreamPage({ isMobile }) {
             const det = msg.detection
             setDetections(prev => [det, ...(prev || [])].slice(0, 20))
             setLiveBoxes(prev => [
-              ...prev, 
-              { ...det, _id: Date.now() + Math.random(), _time: Date.now() }
+              ...prev,
+              { ...det, _id: det.id || (Date.now() + Math.random()), _time: Date.now() }
             ])
           }
         } catch {}
@@ -45,28 +52,27 @@ export default function RecorderLiveStreamPage({ isMobile }) {
     return '#f85149'
   }
 
-  const toggleStream = async () => {
-    const action = streaming ? 'stop' : 'start'
-    await authFetch(`/api/stream/CAM-01/${action}`, { method: 'POST' }).catch(()=>{})
-    setStreaming(!streaming)
-  }
+  const toggleStream = () => setStreaming(s => !s)
 
   const toggleNV = async () => {
-    await authFetch(`/api/recorders/self/night_vision`, {
-      method: 'POST', 
-      body: JSON.stringify({ enabled: !nv })
+    await authFetch(`/api/feeds/processing`, {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: 'CAM-01', night: !nv })
     }).catch(()=>{})
     setNv(!nv)
   }
 
-  const handleSnapshot = async () => authFetch('/api/snapshot/CAM-01', { method: 'POST' }).catch(()=>{})
-  const handleAlert = async () => authFetch('/api/alerts', { method: 'POST', body: JSON.stringify({ type: 'manual', message: 'Manual alert' }) }).catch(()=>{})
+  const handleSnapshot = async () => authFetch('/api/feeds/snapshot', { method: 'POST' }).catch(()=>{})
+  const handleAlert = async () => {
+    await authFetch('/api/comms/messages', { method: 'POST', body: JSON.stringify({ content: 'ALERT from recorder', type: 'alert' }) }).catch(()=>{})
+  }
   const handleLocation = async () => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(async pos => {
         const { latitude, longitude } = pos.coords
-        await authFetch('/api/recorders/self/location', {
-          method: 'POST', body: JSON.stringify({ lat: latitude, lng: longitude })
+        await authFetch('/api/gps/positions', {
+          method: 'POST',
+          body: JSON.stringify({ latitude, longitude })
         }).catch(()=>{})
       })
     }
@@ -94,11 +100,10 @@ export default function RecorderLiveStreamPage({ isMobile }) {
           <div style={{ position: 'relative', aspectRatio: '16/9', background: '#000', overflow: 'hidden' }}>
             {streaming ? (
               <img 
-                src="http://localhost:8000/api/stream/CAM-01" 
+                src={`http://localhost:8000/stream/CAM-01?token=${localStorage.getItem('token')}`} 
                 alt="Live Stream"
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  filter: nv ? 'brightness(0.35) hue-rotate(115deg) saturate(3) contrast(1.2)' : 'none',
                   transition: 'filter 0.3s ease'
                 }}
               />
@@ -161,14 +166,14 @@ export default function RecorderLiveStreamPage({ isMobile }) {
           <div style={{ padding: 12, display: 'flex', gap: 10 }}>
             <button 
               className={`btn ${streaming ? 'btn-danger' : 'btn-primary'}`}
-              style={{ flex: 1, height: 40 }}
+              style={{ flex: 1, height: isMobile ? 54 : 40 }}
               onClick={toggleStream}
             >
               {streaming ? '■ Stop Streaming' : '▶ Start Streaming'}
             </button>
             <button 
               className={`btn ${nv ? 'btn-primary' : 'btn-secondary'}`}
-              style={{ width: 100, height: 40 }}
+              style={{ width: isMobile ? 120 : 100, height: isMobile ? 54 : 40 }}
               onClick={toggleNV}
             >
               🌙 NV {nv ? 'ON' : 'OFF'}
@@ -231,13 +236,13 @@ export default function RecorderLiveStreamPage({ isMobile }) {
         <div className="panel">
           <div className="panel-header">Quick Actions</div>
           <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <button className="btn btn-secondary" style={{ width: '100%', height: 38 }} onClick={handleSnapshot}>
+            <button className="btn btn-secondary" style={{ width: '100%', height: isMobile ? 48 : 38 }} onClick={handleSnapshot}>
               📸 Take Snapshot
             </button>
-            <button className="btn btn-secondary" style={{ width: '100%', height: 38 }} onClick={handleAlert}>
+            <button className="btn btn-secondary" style={{ width: '100%', height: isMobile ? 48 : 38 }} onClick={handleAlert}>
               🚨 Send Alert
             </button>
-            <button className="btn btn-secondary" style={{ width: '100%', height: 38 }} onClick={handleLocation}>
+            <button className="btn btn-secondary" style={{ width: '100%', height: isMobile ? 48 : 38 }} onClick={handleLocation}>
               📍 Update Location
             </button>
           </div>

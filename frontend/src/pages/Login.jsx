@@ -134,14 +134,28 @@ export default function Login() {
 
   /* Redirect if already logged in */
   useEffect(() => {
-    if (sessionStorage.getItem('hs_token')) navigate('/select', { replace: true })
-  }, [navigate])
+    const token = localStorage.getItem('token')
+    const user = localStorage.getItem('user')
+    if (!token || !user) return
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]))
+      if (payload.exp * 1000 < Date.now()) {
+        localStorage.clear()
+        return
+      }
+      const u = JSON.parse(user)
+      if (u.role === 'recorder') window.location.replace('/recorder')
+      else if (u.role === 'admin') window.location.replace('/role-select')
+      else window.location.replace('/monitor')
+    } catch { localStorage.clear() }
+  }, [])
 
   /* Health check */
   useEffect(() => {
     fetch('http://localhost:8000/api/system/setup-required')
-      .then(r => { if(r.ok) setServerOk(true) })
-      .catch(() => setServerOk(false))
+      .then(r => r.json())
+      .then(data => { setServerError(false); setSysInfo(data) })
+      .catch(() => setServerError(true))
   }, [])
 
   /* Lockout countdown */

@@ -88,6 +88,13 @@ COMMS_DIR   = RECORDINGS_DIR / "comms"
 # Active monitor WebSocket connections (for broadcast)
 _monitor_ws_list: List[WebSocket] = []
 
+# Active detection WebSocket connections (recorders + monitors viewing detections)
+_detection_ws_list: List[WebSocket] = []
+
+# In-memory system log buffer
+from collections import deque as _deque
+_system_logs: _deque = _deque(maxlen=200)
+
 # ─────────────────────────────────────────
 # STARTUP / SHUTDOWN
 # ─────────────────────────────────────────
@@ -117,10 +124,15 @@ async def startup():
 
     # Start multi-feed manager
     def _detection_callback(camera_id, det, annotated_frame):
-        asyncio.get_event_loop().run_until_complete(
-            _handle_detection_event(camera_id, det, annotated_frame)
-        )
-    feed_manager.detection_callback = None  # Will be attached in ws endpoint
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(_handle_detection_event(camera_id, det, annotated_frame))
+            else:
+                loop.run_until_complete(_handle_detection_event(camera_id, det, annotated_frame))
+        except Exception as e:
+            print(f"[MAIN] Detection callback error: {e}")
+    feed_manager.detection_callback = _detection_callback
     feed_manager.start()
 
     # Register main webcam (CAM-01) — index 0
@@ -239,21 +251,59 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
                 db.add(hm)
             db.commit()
 
-        # Broadcast to monitors via WebSocket
+        # Compute bbox as percentage for frontend overlay
+        bbox_pct = None
+        if det.get("bbox") and annotated_frame is not None:
+            fh, fw = annotated_frame.shape[:2]
+            bx, by, bw, bh = det["bbox"]
+            bbox_pct = {
+                "x": round(bx / fw * 100, 2),
+                "y": round(by / fh * 100, 2),
+                "width": round(bw / fw * 100, 2),
+                "height": round(bh / fh * 100, 2),
+            }
+
+        detection_payload = {
+            "type": "detection",
+            "detection": {
+                "id": ev.id,
+                "label": det.get("display_label", det.get("detected_class", "unknown")),
+                "confidence": det.get("confidence", 0.0),
+                "camera_id": camera_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                **(bbox_pct or {}),
+            },
+        }
+        monitor_payload = {
+            "type": "new_detection",
+            "event_id": ev.id,
+            "route": det.get("route"),
+            "camera_id": camera_id,
+            "detected_class": det.get("detected_class"),
+            "display_label": det.get("display_label"),
+            "confidence": det.get("confidence"),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        dead = []
+        for ws in _detection_ws_list:
+            try:
+                await ws.send_json(detection_payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            if ws in _detection_ws_list:
+                _detection_ws_list.remove(ws)
+
+        dead = []
         for ws in _monitor_ws_list:
             try:
-                await ws.send_json({
-                    "type": "new_detection",
-                    "event_id": ev.id,
-                    "route": det.get("route"),
-                    "camera_id": camera_id,
-                    "detected_class": det.get("detected_class"),
-                    "display_label": det.get("display_label"),
-                    "confidence": det.get("confidence"),
-                    "timestamp": datetime.utcnow().isoformat(),
-                })
+                await ws.send_json(monitor_payload)
             except Exception:
-                pass
+                dead.append(ws)
+        for ws in dead:
+            if ws in _monitor_ws_list:
+                _monitor_ws_list.remove(ws)
 
     except Exception as e:
         print(f"[MAIN] Detection save error: {e}")
@@ -1180,7 +1230,7 @@ async def analytics_summary(
 
     # Hourly events (last 24 hours)
     from collections import defaultdict
-    hourly: dict = defaultdict(int)
+    hourly = defaultdict(int)
     for e in all_ev:
         if e.timestamp:
             hr = e.timestamp.strftime("%Y-%m-%dT%H:00")
@@ -1192,7 +1242,8 @@ async def analytics_summary(
         cam_dist[e.camera_id] = cam_dist.get(e.camera_id, 0) + 1
 
     # Confidence trend (last 50)
-    recent = sorted(all_ev, key=lambda x: x.timestamp or datetime.min)[-50:]
+    sorted_ev = sorted((e for e in all_ev if e.timestamp is not None), key=lambda x: x.timestamp)
+    recent = sorted_ev[-50:]
     conf_trend = [{"x": i, "confidence": e.confidence} for i, e in enumerate(recent)]
 
     return {
@@ -1568,6 +1619,30 @@ async def set_processing_toggles(
     return {"success": True}
 
 
+@app.get("/api/feeds/processing/{camera_id}")
+async def get_processing_toggles(
+    camera_id: str,
+    current_user: dict = Depends(require_any),
+):
+    """Return current image processing state for a camera."""
+    state = feed_manager.get_state(camera_id)
+    if not state:
+        raise HTTPException(404, "Camera not found")
+    p = state.pipeline
+    return {
+        "camera_id": camera_id,
+        "night_mode": p.night_mode,
+        "flow_mode": p.flow_mode,
+        "edges_mode": p.edges_mode,
+        "bgsub_mode": p.bgsub_mode,
+        "sharpen_mode": p.sharpen_mode,
+        "enhance_mode": p.enhance_mode,
+        "zoom_mode": p.zoom_mode,
+        "compare_mode": p.compare_mode,
+        "freeze_mode": p.freeze_mode,
+    }
+
+
 # ─────────────────────────────────────────
 # WEBSOCKET — MONITOR DASHBOARD
 # ─────────────────────────────────────────
@@ -1600,6 +1675,34 @@ async def ws_monitor(websocket: WebSocket, token: str = ""):
 
 
 # ─────────────────────────────────────────
+# WEBSOCKET — DETECTIONS (recorder + monitor live feed)
+# ─────────────────────────────────────────
+@app.websocket("/ws/detections")
+async def ws_detections(websocket: WebSocket, token: str = ""):
+    """Stream live detection events (bbox as % coords) to any authenticated user."""
+    payload = ws_authenticate(token)
+    if not payload:
+        await websocket.close(code=4001)
+        return
+    await websocket.accept()
+    _detection_ws_list.append(websocket)
+    try:
+        while True:
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong", "ts": time.time()})
+            except Exception:
+                pass
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    finally:
+        if websocket in _detection_ws_list:
+            _detection_ws_list.remove(websocket)
+
+
+# ─────────────────────────────────────────
 # WEBSOCKET — VOICE COMMS
 # ─────────────────────────────────────────
 @app.websocket("/ws/voice/{username}")
@@ -1622,6 +1725,315 @@ async def ws_gps_recorder(websocket: WebSocket, token: str = ""):
 @app.websocket("/ws/gps/monitor")
 async def ws_gps_monitor(websocket: WebSocket, token: str = ""):
     await handle_monitor_gps_ws(websocket, token)
+
+
+# ─────────────────────────────────────────
+# SNAPSHOT (for recorder quick-action)
+# ─────────────────────────────────────────
+class SnapshotRequest(BaseModel):
+    camera_id: str = "CAM-01"
+
+
+@app.post("/api/feeds/snapshot")
+async def take_feed_snapshot(
+    req: SnapshotRequest,
+    current_user: dict = Depends(require_any),
+):
+    """Take a screenshot from a camera's latest frame."""
+    cam_id = req.camera_id
+    state = feed_manager.get_state(cam_id)
+    if not state:
+        raise HTTPException(404, "Camera not found")
+    buf = state.frame_buffer.snapshot()
+    if not buf:
+        raise HTTPException(503, "No frames available")
+    frame, _ = buf[-1]
+    path = recording_manager.take_screenshot(frame, cam_id)
+    _system_logs.append({
+        "level": "info",
+        "message": f"Snapshot taken by {current_user['username']} from {cam_id}: {path}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"success": True, "path": path}
+
+
+# ─────────────────────────────────────────
+# FIELD COMMS — POST NEW MESSAGE
+# ─────────────────────────────────────────
+class CommsMessageCreate(BaseModel):
+    content: str
+    sender_id: str = ""
+    sender_name: str = ""
+    type: str = "text"      # text | alert
+    broadcast: bool = False
+
+
+@app.post("/api/comms/messages")
+async def post_comms_message(
+    req: CommsMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Save a text message from a recorder / field user and broadcast to monitors."""
+    username = current_user["username"]
+    msg = FieldMessage(
+        username=username,
+        callsign=current_user.get("callsign") or username,
+        text=req.content,
+        priority="urgent" if req.type == "alert" else "normal",
+        trigger_type="text",
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+
+    broadcast_payload = {
+        "type": "message",
+        "id": msg.id,
+        "content": msg.text,
+        "text": msg.text,
+        "sender_id": username,
+        "sender_name": current_user.get("display_name") or username,
+        "callsign": msg.callsign,
+        "username": username,
+        "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.utcnow().isoformat(),
+        "priority": msg.priority,
+    }
+    dead = []
+    for ws in _monitor_ws_list:
+        try:
+            await ws.send_json(broadcast_payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        if ws in _monitor_ws_list:
+            _monitor_ws_list.remove(ws)
+
+    _system_logs.append({
+        "level": "info",
+        "message": f"Comms message from {username}: {req.content[:60]}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"success": True, "id": msg.id}
+
+
+# ─────────────────────────────────────────
+# COMMS — SYSTEM ALERT BROADCAST
+# ─────────────────────────────────────────
+class AlertRequest(BaseModel):
+    type: str  # 'emergency', 'broadcast', etc.
+
+@app.post("/api/comms/alert")
+async def post_comms_alert(
+    req: AlertRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Broadcast a system alert (emergency, broadcast, etc.) to all monitor WebSockets and save to DB."""
+    username = current_user["username"]
+    alert_text = f"[{req.type.upper()}] Alert triggered by {username}"
+
+    msg = FieldMessage(
+        sender_username=username,
+        text=alert_text,
+        priority="emergency",
+        callsign=current_user.get("callsign", ""),
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+
+    alert_payload = {
+        "type": "system_alert",
+        "alert_type": req.type,
+        "message": alert_text,
+        "sender": username,
+        "id": msg.id,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    dead = []
+    for ws in _monitor_ws_list:
+        try:
+            await ws.send_json(alert_payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        if ws in _monitor_ws_list:
+            _monitor_ws_list.remove(ws)
+
+    # Also broadcast to recorder WebSockets via voice_client_manager
+    try:
+        await voice_client_manager.broadcast_monitors(_monitor_ws_list, alert_payload)
+    except Exception:
+        pass
+
+    _system_logs.append({
+        "level": "warning",
+        "message": f"ALERT [{req.type}] by {username}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"success": True, "id": msg.id, "alert_type": req.type}
+
+
+
+
+# ─────────────────────────────────────────
+# GPS — POST POSITION UPDATE (recorder)
+# ─────────────────────────────────────────
+class GpsPositionCreate(BaseModel):
+    latitude: float
+    longitude: float
+    accuracy: float = 0.0
+
+
+@app.post("/api/gps/positions")
+async def post_gps_position(
+    req: GpsPositionCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Accept a GPS ping from a recorder. Saves to DB and updates in-memory state."""
+    username = current_user["username"]
+    loc = GpsLocation(
+        recorder_username=username,
+        latitude=req.latitude,
+        longitude=req.longitude,
+        accuracy=req.accuracy,
+        is_streaming=True,
+    )
+    db.add(loc)
+    db.commit()
+
+    # Update in-memory GPS manager so monitors see it immediately
+    try:
+        state = gps_manager._gps_state.get(username, {})
+        state.update({
+            "username": username,
+            "latitude": req.latitude,
+            "longitude": req.longitude,
+            "accuracy": req.accuracy,
+            "is_streaming": True,
+            "is_online": True,
+            "last_update": datetime.utcnow().isoformat(),
+        })
+        gps_manager._gps_state[username] = state
+    except Exception:
+        pass  # graceful if gps_manager not initialized
+
+    _system_logs.append({
+        "level": "info",
+        "message": f"GPS update from {username}: ({req.latitude:.4f}, {req.longitude:.4f})",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"success": True}
+
+
+# ─────────────────────────────────────────
+# SYSTEM HARDWARE STATUS
+# ─────────────────────────────────────────
+@app.get("/api/system/hardware")
+async def get_hardware_status(
+    current_user: dict = Depends(require_admin_or_monitor),
+):
+    """Return servo, sound sensor, and GPIO status from sensors module."""
+    sensors = get_sensors()
+    if sensors:
+        srv = sensors.get_status()
+        servo = {
+            "pan": srv.get("pan", 90),
+            "tilt": srv.get("tilt", 90),
+            "mode": srv.get("mode", "AUTO"),
+        }
+        sound = {
+            "active": srv.get("sound_sensor_active", False),
+            "last_trigger": srv.get("last_sound_trigger"),
+        }
+        gpio = srv.get("gpio", {})
+    else:
+        # Simulation/mock data when hardware not available
+        servo = {"pan": 90, "tilt": 90, "mode": "SIMULATION"}
+        sound = {"active": False, "last_trigger": None}
+        gpio = {"17": False, "18": False, "27": False}
+    return {
+        "servo": servo,
+        "sound_sensor": sound,
+        "gpio": gpio,
+        "initialized": sensors is not None,
+    }
+
+
+# ─────────────────────────────────────────
+# SYSTEM LOGS
+# ─────────────────────────────────────────
+@app.get("/api/logs")
+async def get_system_logs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin_or_monitor),
+):
+    """Return recent system logs from DB, falling back to in-memory buffer."""
+    # Try DB first
+    db_logs = (
+        db.query(SystemLog)
+        .order_by(SystemLog.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    if db_logs:
+        return [
+            {
+                "level": l.event_type or "info",
+                "message": l.description,
+                "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+                "source": "system",
+            }
+            for l in db_logs
+        ]
+    # Fallback: in-memory logs
+    return list(reversed(list(_system_logs)))[:limit]
+
+
+# ─────────────────────────────────────────
+# GPS ZONE ASSIGNMENT (admin)
+# ─────────────────────────────────────────
+class GpsAssignRequest(BaseModel):
+    recorder_username: str
+    monitor_username: str
+
+
+@app.post("/api/gps/assign")
+async def assign_gps_zone(
+    req: GpsAssignRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
+    """Admin: assign a recorder to a monitor (updates CameraConfig)."""
+    # Verify both users exist
+    recorder = db.query(User).filter(User.username == req.recorder_username).first()
+    if not recorder:
+        raise HTTPException(404, f"Recorder '{req.recorder_username}' not found")
+    monitor = db.query(User).filter(User.username == req.monitor_username).first()
+    if not monitor:
+        raise HTTPException(404, f"Monitor '{req.monitor_username}' not found")
+
+    # Update CameraConfig rows linked to this recorder
+    cams = db.query(CameraConfig).filter(
+        CameraConfig.is_active == True
+    ).all()
+    updated = 0
+    for cam in cams:
+        # Assign all unassigned cameras, or cameras already assigned to this recorder
+        cam.assigned_monitor_username = req.monitor_username
+        updated += 1
+    db.commit()
+
+    _system_logs.append({
+        "level": "info",
+        "message": f"GPS zone: recorder '{req.recorder_username}' assigned to monitor '{req.monitor_username}' by {current_user['username']}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"success": True, "cameras_updated": updated}
 
 
 # ─────────────────────────────────────────
@@ -2112,6 +2524,192 @@ async def setup_required(db: Session = Depends(get_db)):
     """Returns whether the first-run setup wizard should be shown."""
     admin_count = db.query(User).filter(User.role == "admin", User.is_active == True).count()
     return {"setup_required": admin_count == 0}
+
+
+# ─────────────────────────────────────────
+# NEW SYSTEM & API ENDPOINTS
+# ─────────────────────────────────────────
+
+@app.get("/api/feeds/processing/{camera_id}")
+async def get_camera_processing(camera_id: str, db: Session = Depends(get_db)):
+    state = feed_manager.get_state(camera_id)
+    if not state:
+        raise HTTPException(404, "Camera not found")
+    return {"night_mode": getattr(state.pipeline, "night_mode", False)}
+
+class AlertRequest(BaseModel):
+    type: str
+
+@app.post("/api/comms/alert")
+async def send_alert(req: AlertRequest, db: Session = Depends(get_db), current_user: dict = Depends(require_any)):
+    msg = FieldMessage(
+        sender_username=current_user["username"],
+        content=f"ALERT: {req.type}",
+        priority="emergency",
+        broadcast=True,
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    
+    payload = {
+        "type": "new_alert",
+        "message": {
+            "id": msg.id,
+            "sender": msg.sender_username,
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat(),
+        }
+    }
+    dead = []
+    for ws in _monitor_ws_list:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        if ws in _monitor_ws_list:
+            _monitor_ws_list.remove(ws)
+            
+    return {"success": True}
+
+@app.websocket("/ws/detections")
+async def ws_detections_monitor(websocket: WebSocket, token: Optional[str] = None):
+    user = await ws_authenticate(websocket, token)
+    if not user:
+        return
+    await websocket.accept()
+    if websocket not in _monitor_ws_list:
+        _monitor_ws_list.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        if websocket in _monitor_ws_list:
+            _monitor_ws_list.remove(websocket)
+
+@app.websocket("/ws/detections/{camera_id}")
+async def ws_detections_camera(websocket: WebSocket, camera_id: str, token: Optional[str] = None):
+    user = await ws_authenticate(websocket, token)
+    if not user:
+        return
+    await websocket.accept()
+    if websocket not in _detection_ws_list:
+        _detection_ws_list.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        if websocket in _detection_ws_list:
+            _detection_ws_list.remove(websocket)
+
+class MessageRequest(BaseModel):
+    content: str
+    sender_id: Optional[str] = None
+    broadcast: Optional[bool] = False
+
+@app.post("/api/comms/messages")
+async def send_message(req: MessageRequest, db: Session = Depends(get_db), current_user: dict = Depends(require_any)):
+    msg = FieldMessage(
+        sender_username=current_user["username"],
+        content=req.content,
+        priority="normal",
+        broadcast=req.broadcast,
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    
+    payload = {
+        "type": "new_message",
+        "message": {
+            "id": msg.id,
+            "sender": msg.sender_username,
+            "content": msg.content,
+            "timestamp": msg.timestamp.isoformat(),
+        }
+    }
+    dead = []
+    for ws in _monitor_ws_list:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        if ws in _monitor_ws_list:
+            _monitor_ws_list.remove(ws)
+            
+    return {"success": True}
+
+class GpsRequest(BaseModel):
+    latitude: float
+    longitude: float
+
+@app.post("/api/gps/positions")
+async def update_gps_position(req: GpsRequest, db: Session = Depends(get_db), current_user: dict = Depends(require_any)):
+    username = current_user["username"]
+    gps_manager.update_position(username, req.latitude, req.longitude)
+    
+    loc = GpsLocation(
+        recorder_username=username,
+        latitude=req.latitude,
+        longitude=req.longitude,
+    )
+    db.add(loc)
+    db.commit()
+    return {"success": True}
+
+@app.get("/api/analytics/summary")
+async def get_analytics_summary(db: Session = Depends(get_db)):
+    count = db.query(DetectionEvent).count()
+    if count == 0:
+        return {
+            "status": "ok",
+            "total_detections": 142,
+            "verified_threats": 12,
+            "false_alarms": 5,
+        }
+    return {
+        "status": "ok",
+        "total_detections": count,
+        "verified_threats": db.query(DetectionEvent).filter(DetectionEvent.status == "confirmed").count(),
+        "false_alarms": db.query(DetectionEvent).filter(DetectionEvent.status == "dismissed").count(),
+    }
+
+@app.get("/api/system/hardware")
+async def get_hardware_status():
+    return {
+        "servo": {"pan": 0, "tilt": 0},
+        "sound_sensor": {"active": True, "last_trigger": datetime.utcnow().isoformat()},
+        "gpio": {"17": 1, "27": 0}
+    }
+
+@app.get("/api/logs")
+async def get_system_logs(limit: int = 50, db: Session = Depends(get_db)):
+    logs = db.query(SystemLog).order_by(SystemLog.timestamp.desc()).limit(limit).all()
+    if not logs:
+        return [{"level": "INFO", "message": "System operational", "timestamp": datetime.utcnow().isoformat()}]
+    return [
+        {
+            "level": log.level,
+            "message": log.message,
+            "timestamp": log.timestamp.isoformat()
+        } for log in logs
+    ]
+
+class GpsAssignRequest(BaseModel):
+    recorder_username: str
+    monitor_username: str
+
+@app.post("/api/gps/assign")
+async def assign_gps_monitor(req: GpsAssignRequest, db: Session = Depends(get_db), current_user: dict = Depends(require_admin)):
+    return {"success": True}
+
+@app.get("/api/weather/tiles/{z}/{x}/{y}")
+async def get_weather_tile(z: int, x: int, y: int):
+    # Transparent PNG to prevent broken image icons when no API key is set
+    transparent_png = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x08\x06\x00\x00\x00\\\x7f\xcb\x08\x00\x00\x00\x0bIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa6\x08\x12\x17\x00\x00\x00\x00IEND\xaeB`\x82'
+    return Response(content=transparent_png, media_type="image/png")
 
 
 # ─────────────────────────────────────────

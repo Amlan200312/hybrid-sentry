@@ -12,6 +12,7 @@ import GalleryPage       from '../components/GalleryPage'
 import ReportsPage       from '../components/ReportsPage'
 import SentryPortalPage  from '../components/SentryPortalPage'
 import SystemStatusPage  from '../components/SystemStatusPage'
+import { authFetch, getUser } from '../utils/api'
 
 const API = 'http://localhost:8000'
 
@@ -31,10 +32,10 @@ const PAGE_LABELS = {
 
 /* ── Live clock ── */
 function LiveClock() {
-  const [time, setTime] = useState(new Date())
+  const [time, setTime] = useState(new Date().toLocaleTimeString())
   useEffect(() => {
-    const id = setInterval(() => setTime(new Date()), 1000)
-    return () => clearInterval(id)
+    const t = setInterval(() => setTime(new Date().toLocaleTimeString()), 1000)
+    return () => clearInterval(t)
   }, [])
   return (
     <span style={{
@@ -43,7 +44,7 @@ function LiveClock() {
       color: 'var(--text-secondary)',
       letterSpacing: '0.05em',
     }}>
-      {time.toLocaleTimeString()}
+      {time}
     </span>
   )
 }
@@ -53,21 +54,20 @@ export default function MonitorDashboard() {
   const [view, setView]     = useState('live-feeds')
   const [badges, setBadges] = useState({ verify: 0, comms: 0 })
 
-  const displayName = sessionStorage.getItem('hs_display_name') || 'Operator'
+  const user = getUser() || {}
+  const displayName = user.display_name || user.username || 'Operator'
   const initials = displayName.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || 'OP'
 
   const fetchBadges = useCallback(() => {
-    const token = sessionStorage.getItem('hs_token')
-    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
     Promise.all([
-      fetch(`http://localhost:8000/api/detections/verify-queue`, { headers: hdrs, credentials: 'include' })
-        .then(r => r.ok ? r.json() : []).catch(() => []),
-      fetch(`http://localhost:8000/api/comms/messages?unacked=true&limit=50`, { headers: hdrs, credentials: 'include' })
-        .then(r => r.ok ? r.json() : []).catch(() => []),
+      authFetch(`/api/detections/verify-queue`).then(r => r ? r.json() : []).catch(() => []),
+      authFetch(`/api/comms/messages?unacked=true&limit=50`).then(r => r ? r.json() : []).catch(() => []),
     ]).then(([vq, msgs]) => {
+      const vqArr = Array.isArray(vq) ? vq : (vq?.items || vq?.data || [])
+      const msgsArr = Array.isArray(msgs) ? msgs : (msgs?.items || msgs?.data || [])
       setBadges({
-        verify: Array.isArray(vq)   ? vq.length  : (vq?.count   || 0),
-        comms:  Array.isArray(msgs) ? msgs.length : (msgs?.count || 0),
+        verify: vqArr.length,
+        comms: msgsArr.length,
       })
     })
   }, [])
@@ -163,8 +163,11 @@ export default function MonitorDashboard() {
           flexDirection: 'column',
           gap: 16,
           minHeight: 0,
+          scrollBehavior: 'smooth'
         }}>
-          {renderPage()}
+          <div key={view} className="page-enter">
+            {renderPage()}
+          </div>
         </div>
       </div>
     </div>
