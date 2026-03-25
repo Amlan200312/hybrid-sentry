@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { authFetch, authWS, getUser } from '../../utils/api'
+import { authFetch, authWS, getUser, getToken } from '../../utils/api'
 
 export default function RecorderLiveStreamPage({ isMobile }) {
+  const [streamKey, setStreamKey] = useState(0)
   const [nv, setNv] = useState(false)
   const [streaming, setStreaming] = useState(true)
   const [detections, setDetections] = useState([])
@@ -39,6 +40,13 @@ export default function RecorderLiveStreamPage({ isMobile }) {
   }, [])
 
   useEffect(() => {
+    const interval = setInterval(() => {
+      setStreamKey(prev => prev + 1);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     const id = setInterval(() => {
       setLiveBoxes(prev => prev.filter(b => Date.now() - b._time < 4000))
     }, 1000)
@@ -62,7 +70,7 @@ export default function RecorderLiveStreamPage({ isMobile }) {
     setNv(!nv)
   }
 
-  const handleSnapshot = async () => authFetch('/api/feeds/snapshot', { method: 'POST' }).catch(()=>{})
+  const handleSnapshot = async () => authFetch('/api/recordings/CAM-01/snapshot', { method: 'POST' }).catch(()=>{})
   const handleAlert = async () => {
     await authFetch('/api/comms/messages', { method: 'POST', body: JSON.stringify({ content: 'ALERT from recorder', type: 'alert' }) }).catch(()=>{})
   }
@@ -79,10 +87,10 @@ export default function RecorderLiveStreamPage({ isMobile }) {
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '2fr 1fr', gap: 16 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.2fr 0.8fr', gap: 12 }}>
       {/* LEFT PANEL */}
       <div className="panel" style={{ display: 'flex', flexDirection: 'column', padding: 0 }}>
-        <div className="panel-header" style={{ padding: '12px', borderBottom: '1px solid var(--border)' }}>
+        <div className="panel-header" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div className="live-dot" style={{ width: 8, height: 8 }} />
             <span style={{ fontWeight: 600 }}>CAM-01</span>
@@ -100,11 +108,16 @@ export default function RecorderLiveStreamPage({ isMobile }) {
           <div style={{ position: 'relative', aspectRatio: '16/9', background: '#000', overflow: 'hidden' }}>
             {streaming ? (
               <img 
-                src={`http://localhost:8000/stream/CAM-01?token=${localStorage.getItem('token')}`} 
+                key={streamKey}
+                src={`http://localhost:8000/stream/CAM-01?token=${getToken()}`} 
                 alt="Live Stream"
                 style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
+                  width: '100%', height: '100%', objectFit: 'contain',
                   transition: 'filter 0.3s ease'
+                }}
+                onError={() => {
+                  console.warn("Stream image error, retrying...");
+                  setStreamKey(prev => prev + 1);
                 }}
               />
             ) : (
@@ -163,7 +176,7 @@ export default function RecorderLiveStreamPage({ isMobile }) {
             )}
           </div>
 
-          <div style={{ padding: 12, display: 'flex', gap: 10 }}>
+          <div style={{ padding: 8, display: 'flex', gap: 8 }}>
             <button 
               className={`btn ${streaming ? 'btn-danger' : 'btn-primary'}`}
               style={{ flex: 1, height: isMobile ? 54 : 40 }}
@@ -180,7 +193,7 @@ export default function RecorderLiveStreamPage({ isMobile }) {
             </button>
           </div>
 
-          <div style={{ padding: '0 12px 12px', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ padding: '0 8px 8px', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <span className={`badge badge-${streaming?'green':'muted'}`}>
               <div className="live-dot" style={{ width: 6, height: 6, background: streaming ? '#39ff14' : '#8b949e' }} />
               {streaming ? 'LIVE' : 'IDLE'}

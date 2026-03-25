@@ -211,12 +211,16 @@ class MultiFeedManager:
         if isinstance(source, int) or isinstance(source, str):
             cap = cv2.VideoCapture(source)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            print(f"[CAM] {state.camera_id} resolution: {int(width)}x{int(height)}")
             state.cap = cap
         else:
             cap = None
 
         target_fps = 30
         frame_interval = 1.0 / target_fps
+        last_log_time = time.time()
 
         while not state._stop_event.is_set():
             t_start = time.time()
@@ -226,6 +230,11 @@ class MultiFeedManager:
                 ret, frame = cap.read()
                 if not ret:
                     frame = None
+
+            # Every 100 frames, print a dot to show it's alive
+            if time.time() - last_log_time > 5:
+                print(f"[CAM] Capturing frames... {state.camera_id}")
+                last_log_time = time.time()
 
             if frame is None:
                 # Camera offline — push offline frame
@@ -377,6 +386,9 @@ class MultiFeedManager:
             if not state:
                 continue
 
+            if frame.shape[0] > 480 or frame.shape[1] > 640:
+                frame = cv2.resize(frame, (640, 480))
+
             engine = get_engine(camera_id)
             zones = []  # TODO: inject from DB at startup, refresh periodically
 
@@ -434,6 +446,7 @@ class MultiFeedManager:
         if not state:
             return
 
+        last_yield = time.time()
         while True:
             with state._jpeg_lock:
                 jpeg = state.latest_jpeg
@@ -445,7 +458,13 @@ class MultiFeedManager:
                     + jpeg
                     + b"\r\n"
                 )
-            time.sleep(1 / 30)  # 30fps max
+                # Throttle to 15 fps
+                elapsed = time.time() - last_yield
+                if elapsed < 1/15:
+                    time.sleep(1/15 - elapsed)
+                last_yield = time.time()
+            else:
+                time.sleep(0.05)  # wait a bit if no frame yet
 
     # ─── Offline Frame Generator ─────────────────────────────
     def _make_offline_frame(self, state: CameraState) -> np.ndarray:

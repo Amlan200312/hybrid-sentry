@@ -12,6 +12,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
+import cv2
+import numpy as np
 
 from fastapi import (
     FastAPI, Depends, HTTPException, Request, Response,
@@ -35,7 +37,7 @@ from database import (
 from auth import (
     authenticate_user, get_current_user, require_admin,
     require_admin_or_monitor, require_any, ws_authenticate,
-    create_user, change_pin, reset_pin_admin
+    create_user, change_password, reset_password_admin
 )
 from multi_feed import feed_manager
 from system_stats import system_stats
@@ -135,10 +137,29 @@ async def startup():
     feed_manager.detection_callback = _detection_callback
     feed_manager.start()
 
-    # Register main webcam (CAM-01) — index 0
+    # Register main webcam (CAM-01) — auto-detect working camera index
     try:
-        feed_manager.add_camera("CAM-01", 0)
-        print("[MAIN] CAM-01 (USB Webcam) registered")
+        _cam_registered = False
+        for _cam_idx in range(6):  # Try indices 0 to 5
+            if _platform.system() == "Windows":
+                _test = cv2.VideoCapture(_cam_idx, cv2.CAP_DSHOW)
+            else:
+                _test = cv2.VideoCapture(_cam_idx)
+            
+            if _test.isOpened():
+                _ret, _frame = _test.read()
+                _test.release()
+                if _ret and _frame is not None:
+                    feed_manager.add_camera("CAM-01", _cam_idx)
+                    print(f"[MAIN] CAM-01 registered successfully on index {_cam_idx}")
+                    _cam_registered = True
+                    break
+            else:
+                _test.release()
+        if not _cam_registered:
+            # Fallback: register index 0 anyway so MJPEG endpoint exists
+            feed_manager.add_camera("CAM-01", 0)
+            print("[MAIN] CAM-01 registered (fallback index 0 — may be offline)")
     except Exception as e:
         print(f"[MAIN] CAM-01 register error: {e}")
 
@@ -159,6 +180,7 @@ async def shutdown():
 # ─────────────────────────────────────────
 async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
     """Save detection to DB and route to verify queue or event log."""
+    print(f"[MAIN] Detection event received: {det.get('detected_class')} on {camera_id}")
     from database import SessionLocal, DetectionEvent, VerifyQueue
     from recording import recording_manager
     import cv2, numpy as np
@@ -190,12 +212,26 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
         gps_lat = gps_positions[0].get("latitude") if gps_positions else None
         gps_lng = gps_positions[0].get("longitude") if gps_positions else None
 
+        # ── Distance estimation via pinhole camera model ──────────────────
+        # Assumes: person avg height = 1.7m, focal_length = 800px (adjust per camera)
+        distance_m = det.get("distance_m")
+        if not distance_m and det.get("bbox") and annotated_frame is not None:
+            bbox = det["bbox"]
+            detected_class = det.get("detected_class", "")
+            fh_full, fw_full = annotated_frame.shape[:2]
+            real_heights = {"person": 1.7, "vehicle": 1.5, "bicycle": 1.1, "dog": 0.5}
+            real_h = real_heights.get(detected_class, 1.0)
+            focal_len_px = 800  # approximate; calibrate for your camera
+            bbox_pixel_h = abs(bbox[3] - bbox[1])  # y2 - y1
+            if bbox_pixel_h > 5:  # guard against near-zero division
+                distance_m = round((real_h * focal_len_px) / bbox_pixel_h, 1)
+
         ev = DetectionEvent(
             track_id=det.get("track_id"),
             detected_class=det.get("detected_class", "unknown"),
             display_label=det.get("display_label", "Unknown"),
             confidence=det.get("confidence", 0.0),
-            distance_m=det.get("distance_m"),
+            distance_m=distance_m,
             speed_ms=det.get("speed_ms", 0.0),
             zone_name=det.get("zone"),
             camera_id=camera_id,
@@ -255,22 +291,35 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
         bbox_pct = None
         if det.get("bbox") and annotated_frame is not None:
             fh, fw = annotated_frame.shape[:2]
-            bx, by, bw, bh = det["bbox"]
+            x, y, w, h = det["bbox"]
             bbox_pct = {
-                "x": round(bx / fw * 100, 2),
-                "y": round(by / fh * 100, 2),
-                "width": round(bw / fw * 100, 2),
-                "height": round(bh / fh * 100, 2),
+                "x": round(x / fw * 100, 2),
+                "y": round(y / fh * 100, 2),
+                "width": round(w / fw * 100, 2),
+                "height": round(h / fh * 100, 2),
             }
+
+        # Build boxes array for frontend bounding box overlay
+        boxes_list = []
+        if bbox_pct:
+            boxes_list = [{
+                "label": det.get("detected_class", "unknown"),
+                "confidence": det.get("confidence", 0.0),
+                "x": bbox_pct["x"] / 100,
+                "y": bbox_pct["y"] / 100,
+                "w": bbox_pct["width"] / 100,
+                "h": bbox_pct["height"] / 100,
+            }]
 
         detection_payload = {
             "type": "detection",
-            "detection": {
+            "data": {
                 "id": ev.id,
                 "label": det.get("display_label", det.get("detected_class", "unknown")),
                 "confidence": det.get("confidence", 0.0),
                 "camera_id": camera_id,
                 "timestamp": datetime.utcnow().isoformat(),
+                "boxes": boxes_list,
                 **(bbox_pct or {}),
             },
         }
@@ -285,21 +334,28 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
             "timestamp": datetime.utcnow().isoformat(),
         }
 
+        print(f"[BROADCAST] Detection event: camera={camera_id}, class={det.get('detected_class')}, confd={det.get('confidence'):.2f}, boxes={boxes_list}")
+        print(f"[BROADCAST] Sending to {len(_detection_ws_list)} detection WS client(s)")
         dead = []
         for ws in _detection_ws_list:
             try:
                 await ws.send_json(detection_payload)
-            except Exception:
+                print(f"[BROADCAST] -> detection WS ok")
+            except Exception as ex:
+                print(f"[BROADCAST] -> detection WS error: {ex}")
                 dead.append(ws)
         for ws in dead:
             if ws in _detection_ws_list:
                 _detection_ws_list.remove(ws)
 
+        print(f"[BROADCAST] Sending to {len(_monitor_ws_list)} monitor WS client(s)")
         dead = []
         for ws in _monitor_ws_list:
             try:
                 await ws.send_json(monitor_payload)
-            except Exception:
+                print(f"[BROADCAST] -> monitor WS ok")
+            except Exception as ex:
+                print(f"[BROADCAST] -> monitor WS error: {ex}")
                 dead.append(ws)
         for ws in dead:
             if ws in _monitor_ws_list:
@@ -346,7 +402,7 @@ async def _handle_acoustic_event(ev: dict):
 # ─────────────────────────────────────────
 class LoginRequest(BaseModel):
     username: str
-    pin: str
+    password: str
 
 class VerifyRequest(BaseModel):
     action: str      # confirm | dismiss | escalate
@@ -366,7 +422,7 @@ class ServoCommand(BaseModel):
 
 class UserCreate(BaseModel):
     username: str
-    pin: str
+    password: str
     role: str
     display_name: str = ""
     operator_id: str = ""
@@ -379,13 +435,13 @@ class UserCreate(BaseModel):
     id_pass_number: str = ""
     callsign: str = ""
 
-class PINChange(BaseModel):
-    old_pin: str
-    new_pin: str
+class PasswordChange(BaseModel):
+    old_password: str
+    new_password: str
 
-class AdminPINReset(BaseModel):
+class AdminPasswordReset(BaseModel):
     target_username: str
-    new_pin: str
+    new_password: str
 
 class CallsignUpdate(BaseModel):
     camera_id: Optional[str] = None
@@ -417,7 +473,7 @@ class SetupRequest(BaseModel):
     security_level: str
     admin_name: str
     admin_username: str
-    admin_pin: str
+    admin_password: str
     badge_id: str = ""
     rank: str = ""
     designation: str = ""
@@ -437,7 +493,7 @@ class RegisterRequest(BaseModel):
     contact_number: str = ""
     blood_group: str = ""
     id_pass_number: str = ""
-    pin: str
+    password: str
 
 
 # ─────────────────────────────────────────
@@ -447,7 +503,7 @@ class RegisterRequest(BaseModel):
 async def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     from auth import authenticate_user
     ip = request.client.host if request.client else ""
-    result = authenticate_user(db, req.username, req.pin, ip=ip)
+    result = authenticate_user(db, req.username, req.password, ip=ip)
     return result
 
 
@@ -473,17 +529,15 @@ async def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if role not in allowed_roles:
         raise HTTPException(status_code=400, detail="Invalid role")
 
-    # Validate PIN length
-    pin_lengths = {"recorder": 4, "monitor": 6, "admin": 8}
-    expected_len = pin_lengths[role]
-    if len(req.pin) != expected_len or not req.pin.isdigit():
+    # Validate password length
+    if len(req.password) < 6:
         raise HTTPException(
             status_code=400,
-            detail=f"{role.capitalize()} PIN must be exactly {expected_len} digits"
+            detail="Password must be at least 6 characters long"
         )
 
-    # Hash PIN
-    pin_hash = bcrypt.hashpw(req.pin.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    # Hash password
+    pin_hash = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
     # Recorders are immediately active; admin/monitor need approval
     is_active = role == "recorder"
@@ -568,7 +622,7 @@ async def system_setup(req: SetupRequest, db: Session = Depends(get_db)):
     try:
         # Admin user
         admin_hash = bcrypt.hashpw(
-            req.admin_pin.encode("utf-8"), bcrypt.gensalt(rounds=12)
+            req.admin_password.encode("utf-8"), bcrypt.gensalt(rounds=12)
         ).decode("utf-8")
         admin = User(
             username=req.admin_username,
@@ -1424,10 +1478,14 @@ async def download_csv(
 # ─────────────────────────────────────────
 @app.get("/api/users")
 async def list_users(
+    role: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(require_admin_or_monitor),
 ):
-    users = db.query(User).filter(User.is_active == True).all()
+    q = db.query(User).filter(User.is_active == True)
+    if role:
+        q = q.filter(User.role == role)
+    users = q.all()
     return [
         {
             "id": u.id,
@@ -1435,6 +1493,8 @@ async def list_users(
             "role": u.role,
             "display_name": u.display_name,
             "operator_id": u.operator_id,
+            "camera_id": "CAM-01" if u.role == "recorder" else None,
+            "status": "offline",  # real-time status via WebSocket; default offline
             "created_at": u.created_at.isoformat() if u.created_at else None,
         }
         for u in users
@@ -1476,27 +1536,27 @@ async def delete_user(
     return {"deleted": username}
 
 
-@app.post("/api/users/change-pin")
-async def change_pin_endpoint(
-    req: PINChange,
+@app.post("/api/users/change-password")
+async def change_password_endpoint(
+    req: PasswordChange,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_any),
 ):
     try:
-        change_pin(db, current_user["username"], req.old_pin, req.new_pin)
+        change_password(db, current_user["username"], req.old_password, req.new_password)
         return {"success": True}
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/users/admin-reset-pin")
-async def admin_reset_pin(
-    req: AdminPINReset,
+@app.post("/api/users/admin-reset-password")
+async def admin_reset_password(
+    req: AdminPasswordReset,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     try:
-        reset_pin_admin(db, req.target_username, req.new_pin)
+        reset_password_admin(db, req.target_username, req.new_password)
         return {"success": True}
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -1728,6 +1788,27 @@ async def ws_gps_monitor(websocket: WebSocket, token: str = ""):
 
 
 # ─────────────────────────────────────────
+# RECORDER SELF STATUS
+# ─────────────────────────────────────────
+@app.get("/api/recorders/self/status")
+async def recorder_self_status(
+    current_user: dict = Depends(require_any),
+):
+    """Return current recorder hardware/stream status (mock values for non-RPi)."""
+    feeds = feed_manager.get_status()
+    cam_state = feeds.get("CAM-01", {})
+    return {
+        "username": current_user["username"],
+        "camera_id": "CAM-01",
+        "is_streaming": cam_state.get("is_online", False),
+        "fps": cam_state.get("fps", 0),
+        "battery": 85,          # mock — real value from GPIO on RPi
+        "wifi_strength": -62,   # mock — real value from iwconfig on RPi
+        "recording": cam_state.get("is_recording", False),
+    }
+
+
+# ─────────────────────────────────────────
 # SNAPSHOT (for recorder quick-action)
 # ─────────────────────────────────────────
 class SnapshotRequest(BaseModel):
@@ -1834,10 +1915,11 @@ async def post_comms_alert(
     alert_text = f"[{req.type.upper()}] Alert triggered by {username}"
 
     msg = FieldMessage(
-        sender_username=username,
+        username=username,
         text=alert_text,
         priority="emergency",
         callsign=current_user.get("callsign", ""),
+        trigger_type="alert",
     )
     db.add(msg)
     db.commit()
@@ -1928,6 +2010,103 @@ async def post_gps_position(
     })
     return {"success": True}
 
+
+
+# ─────────────────────────────────────────
+# GPS ZONES CRUD
+# ─────────────────────────────────────────
+class ZoneCreate(BaseModel):
+    camera_id: str = "GPS"
+    zone_name: str
+    zone_type: str   # restricted | safe | alert | perimeter
+    coordinates: list  # list of {lat, lng} objects for GPS zones
+
+class ZoneUpdate(BaseModel):
+    zone_name: Optional[str] = None
+    zone_type: Optional[str] = None
+    coordinates: Optional[list] = None
+    is_active: Optional[bool] = None
+
+@app.get("/api/zones")
+async def list_zones(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Return all active GPS zones."""
+    zones = db.query(Zone).filter(Zone.is_active == True).all()
+    return [
+        {
+            "id": z.id,
+            "camera_id": z.camera_id,
+            "zone_name": z.zone_name,
+            "zone_type": z.zone_type,
+            "coordinates": z.coordinates,
+            "created_by": z.created_by,
+            "created_at": z.created_at.isoformat() if z.created_at else None,
+            "is_active": z.is_active,
+        }
+        for z in zones
+    ]
+
+@app.post("/api/zones")
+async def create_zone(
+    z: ZoneCreate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
+    """Create a new GPS zone (admin only)."""
+    zone = Zone(
+        camera_id=z.camera_id,
+        zone_name=z.zone_name,
+        zone_type=z.zone_type,
+        coordinates=z.coordinates,
+        created_by=current_user["username"],
+    )
+    db.add(zone)
+    db.commit()
+    db.refresh(zone)
+    _system_logs.append({
+        "level": "info",
+        "message": f"Zone '{z.zone_name}' created by {current_user['username']}",
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    return {"success": True, "id": zone.id}
+
+@app.put("/api/zones/{zone_id}")
+async def update_zone(
+    zone_id: int,
+    body: ZoneUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
+    """Update a GPS zone (admin only)."""
+    zone = db.query(Zone).filter(Zone.id == zone_id).first()
+    if not zone:
+        raise HTTPException(404, "Zone not found")
+    if body.zone_name is not None:
+        zone.zone_name = body.zone_name
+    if body.zone_type is not None:
+        zone.zone_type = body.zone_type
+    if body.coordinates is not None:
+        zone.coordinates = body.coordinates
+    if body.is_active is not None:
+        zone.is_active = body.is_active
+    db.commit()
+    return {"success": True}
+
+@app.delete("/api/zones/{zone_id}")
+async def delete_zone(
+    zone_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
+    """Soft-delete a GPS zone (admin only)."""
+    zone = db.query(Zone).filter(Zone.id == zone_id).first()
+    if not zone:
+        raise HTTPException(404, "Zone not found")
+    zone.is_active = False
+    db.commit()
+    return {"success": True}
 
 # ─────────────────────────────────────────
 # SYSTEM HARDWARE STATUS
@@ -2537,72 +2716,6 @@ async def get_camera_processing(camera_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Camera not found")
     return {"night_mode": getattr(state.pipeline, "night_mode", False)}
 
-class AlertRequest(BaseModel):
-    type: str
-
-@app.post("/api/comms/alert")
-async def send_alert(req: AlertRequest, db: Session = Depends(get_db), current_user: dict = Depends(require_any)):
-    msg = FieldMessage(
-        sender_username=current_user["username"],
-        content=f"ALERT: {req.type}",
-        priority="emergency",
-        broadcast=True,
-    )
-    db.add(msg)
-    db.commit()
-    db.refresh(msg)
-    
-    payload = {
-        "type": "new_alert",
-        "message": {
-            "id": msg.id,
-            "sender": msg.sender_username,
-            "content": msg.content,
-            "timestamp": msg.timestamp.isoformat(),
-        }
-    }
-    dead = []
-    for ws in _monitor_ws_list:
-        try:
-            await ws.send_json(payload)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        if ws in _monitor_ws_list:
-            _monitor_ws_list.remove(ws)
-            
-    return {"success": True}
-
-@app.websocket("/ws/detections")
-async def ws_detections_monitor(websocket: WebSocket, token: Optional[str] = None):
-    user = await ws_authenticate(websocket, token)
-    if not user:
-        return
-    await websocket.accept()
-    if websocket not in _monitor_ws_list:
-        _monitor_ws_list.append(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        if websocket in _monitor_ws_list:
-            _monitor_ws_list.remove(websocket)
-
-@app.websocket("/ws/detections/{camera_id}")
-async def ws_detections_camera(websocket: WebSocket, camera_id: str, token: Optional[str] = None):
-    user = await ws_authenticate(websocket, token)
-    if not user:
-        return
-    await websocket.accept()
-    if websocket not in _detection_ws_list:
-        _detection_ws_list.append(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        if websocket in _detection_ws_list:
-            _detection_ws_list.remove(websocket)
-
 class MessageRequest(BaseModel):
     content: str
     sender_id: Optional[str] = None
@@ -2710,6 +2823,133 @@ async def get_weather_tile(z: int, x: int, y: int):
     # Transparent PNG to prevent broken image icons when no API key is set
     transparent_png = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x08\x06\x00\x00\x00\\\x7f\xcb\x08\x00\x00\x00\x0bIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa6\x08\x12\x17\x00\x00\x00\x00IEND\xaeB`\x82'
     return Response(content=transparent_png, media_type="image/png")
+
+
+# ─────────────────────────────────────────
+# OCR — EasyOCR (loaded once at startup)
+# ─────────────────────────────────────────
+_ocr_reader = None
+
+def _get_ocr_reader():
+    """Lazy-load EasyOCR reader (heavy, load once)."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        try:
+            import easyocr
+            _ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+            print("[OCR] EasyOCR reader loaded.")
+        except Exception as e:
+            print(f"[OCR] EasyOCR not available: {e}")
+    return _ocr_reader
+
+
+class OcrRequest(BaseModel):
+    image_path: str
+
+@app.post("/api/ocr/extract")
+async def ocr_extract(
+    req: OcrRequest,
+    current_user: dict = Depends(require_any),
+):
+    """Extract text from an image file using EasyOCR."""
+    reader = _get_ocr_reader()
+    if not reader:
+        raise HTTPException(503, "OCR engine unavailable (easyocr not installed)")
+
+    img_path = Path(req.image_path)
+    if not img_path.exists():
+        raise HTTPException(404, f"Image not found: {req.image_path}")
+
+    try:
+        results = reader.readtext(str(img_path))
+        extracted = [
+            {"text": text, "confidence": round(float(conf), 3), "bbox": bbox}
+            for bbox, text, conf in results
+        ]
+        full_text = " ".join(r["text"] for r in extracted)
+        return {"success": True, "text": full_text, "results": extracted}
+    except Exception as e:
+        raise HTTPException(500, f"OCR failed: {e}")
+
+
+# ─────────────────────────────────────────
+# RECORDINGS — Clip & Snapshot
+# ─────────────────────────────────────────
+@app.get("/api/recordings/clip/{event_id}")
+async def get_event_clip(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Return a 0.5x slow-motion version of the event clip. Generates on-demand."""
+    ev = db.query(DetectionEvent).filter(DetectionEvent.id == event_id).first()
+    if not ev:
+        raise HTTPException(404, "Detection event not found")
+
+    # Look for existing clip
+    original_path = None
+    if ev.clip_path and Path(ev.clip_path).exists():
+        original_path = Path(ev.clip_path)
+    else:
+        # Search clips directory for matching event
+        for f in CLIPS_DIR.glob(f"*{event_id}*.mp4"):
+            original_path = f
+            break
+        if not original_path:
+            for f in CLIPS_DIR.glob("*.mp4"):
+                original_path = f  # fallback: any clip
+                break
+
+    if not original_path or not original_path.exists():
+        raise HTTPException(404, "No clip available for this event")
+
+    # Generate slow-motion copy (0.5x = halved FPS)
+    slow_path = CLIPS_DIR / f"slow_{original_path.name}"
+    if not slow_path.exists():
+        try:
+            cap = cv2.VideoCapture(str(original_path))
+            orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            slow_fps = max(1.0, orig_fps * 0.5)   # halve the frame rate
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(slow_path), fourcc, slow_fps, (w, h))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                writer.write(frame)
+            cap.release()
+            writer.release()
+        except Exception as e:
+            print(f"[CLIP] Slow-motion generation failed: {e}")
+            # Fall back to original if slow-mo generation fails
+            slow_path = original_path
+
+    return FileResponse(str(slow_path), media_type="video/mp4", filename=slow_path.name)
+
+
+@app.post("/api/recordings/{camera_id}/snapshot")
+async def take_snapshot(
+    camera_id: str,
+    current_user: dict = Depends(require_any),
+):
+    """Capture a snapshot from the live camera stream and save to disk."""
+    state = feed_manager.get_state(camera_id)
+    if not state or not state.is_online:
+        raise HTTPException(503, f"Camera {camera_id} is offline")
+
+    with state._jpeg_lock:
+        jpeg_data = state.latest_jpeg
+
+    if not jpeg_data:
+        raise HTTPException(503, "No frame available yet")
+
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    snap_path = SCREENSHOTS_DIR / f"{camera_id}_{ts}_snap.jpg"
+    snap_path.write_bytes(jpeg_data)
+    return {"success": True, "path": str(snap_path), "url": f"/recordings/screenshots/{snap_path.name}"}
 
 
 # ─────────────────────────────────────────

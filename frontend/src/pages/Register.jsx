@@ -35,9 +35,9 @@ const RANKS_BY_BRANCH = {
 }
 
 const ROLES = [
-  { value: 'admin',    label: 'Admin',    pinLen: 8 },
-  { value: 'monitor',  label: 'Monitor',  pinLen: 6 },
-  { value: 'recorder', label: 'Recorder', pinLen: 4 },
+  { value: 'admin',    label: 'Admin' },
+  { value: 'monitor',  label: 'Monitor' },
+  { value: 'recorder', label: 'Recorder' },
 ]
 
 const BRANCHES = Object.keys(RANKS_BY_BRANCH)
@@ -60,14 +60,13 @@ export default function Register() {
   const [branch,    setBranch]    = useState('Indian Army')
   const [rank,      setRank]      = useState('')
   const [role,      setRole]      = useState('monitor')
-  const [pin,       setPin]       = useState('')
-  const [confirmPin,setConfirmPin]= useState('')
+  const [password,      setPassword]      = useState('')
+  const [confirmPassword,setConfirmPassword]= useState('')
   const [errors,    setErrors]    = useState({})
   const [loading,   setLoading]   = useState(false)
   const [success,   setSuccess]   = useState(false)
   const [apiError,  setApiError]  = useState('')
 
-  const pinLen = ROLES.find(r => r.value === role)?.pinLen || 6
   const ranks  = RANKS_BY_BRANCH[branch] || []
 
   function validate() {
@@ -75,9 +74,8 @@ export default function Register() {
     if (!fullName.trim()) e.fullName = 'Full name is required'
     if (!username.trim()) e.username = 'Username is required'
     if (!rank) e.rank = 'Please select a rank'
-    if (pin.length !== pinLen) e.pin = `PIN must be exactly ${pinLen} digits`
-    if (!/^\d+$/.test(pin))   e.pin = 'PIN must be numeric only'
-    if (pin !== confirmPin)    e.confirmPin = 'PINs do not match'
+    if (password.length < 6) e.password = 'Password must be at least 6 characters'
+    if (password !== confirmPassword)    e.confirmPassword = 'Passwords do not match'
     return e
   }
 
@@ -89,17 +87,17 @@ export default function Register() {
     if (Object.keys(errs).length > 0) return
     setLoading(true)
     try {
-      const res = await fetch(`${API}/api/register`, {
+      const res = await fetch(`${API}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           username: username.trim().toLowerCase(),
-          realName: fullName.trim(),
+          full_name: fullName.trim(),
           role,
           rank,
-          branch,
-          pin,
+          unit_name: branch,
+          password: password,
         }),
       })
       const data = await res.json()
@@ -227,7 +225,7 @@ export default function Register() {
                 <button
                   key={r.value}
                   type="button"
-                  onClick={() => { setRole(r.value); setPin(''); setConfirmPin('') }}
+                  onClick={() => { setRole(r.value); setPassword(''); setConfirmPassword('') }}
                   style={{
                     flex: 1,
                     padding: '7px 0',
@@ -242,33 +240,28 @@ export default function Register() {
                   }}
                 >
                   {r.label}
-                  <div style={{ fontSize: 9, opacity: 0.7, marginTop: 1 }}>{r.pinLen}-digit PIN</div>
                 </button>
               ))}
             </div>
           </Field>
 
-          <Field label={`PIN (${pinLen} digits)`} error={errors.pin}>
+          <Field label="Password (min. 6 characters)" error={errors.password}>
             <input
-              className={`input-field ${errors.pin ? 'error' : ''}`}
-              type="tel"
-              inputMode="numeric"
-              maxLength={pinLen}
-              value={pin}
-              onChange={e => setPin(e.target.value.replace(/\D/g, '').slice(0, pinLen))}
-              placeholder={'•'.repeat(pinLen)}
+              className={`input-field ${errors.password ? 'error' : ''}`}
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
             />
           </Field>
 
-          <Field label="Confirm PIN" error={errors.confirmPin}>
+          <Field label="Confirm Password" error={errors.confirmPassword}>
             <input
-              className={`input-field ${errors.confirmPin ? 'error' : ''}`}
-              type="tel"
-              inputMode="numeric"
-              maxLength={pinLen}
-              value={confirmPin}
-              onChange={e => setConfirmPin(e.target.value.replace(/\D/g, '').slice(0, pinLen))}
-              placeholder={'•'.repeat(pinLen)}
+              className={`input-field ${errors.confirmPassword ? 'error' : ''}`}
+              type="password"
+              value={confirmPassword}
+              onChange={e => setConfirmPassword(e.target.value)}
+              placeholder="••••••••"
             />
           </Field>
 

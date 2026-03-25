@@ -16,7 +16,8 @@ from typing import Optional, Tuple, List
 # ─────────────────────────────────────────
 def night_vision(frame: np.ndarray) -> np.ndarray:
     """
-    Lightweight night vision: LAB conversion → equalize L channel → BGR → boost green x1.2
+    High-quality night vision: CLAHE on L-channel + bilateral filter + green boost.
+    Uses CLAHE instead of histEq for better local contrast without over-exposure.
     Processes every other frame to maintain FPS on RPi.
     """
     if not hasattr(night_vision, '_frame_counter'):
@@ -28,16 +29,22 @@ def night_vision(frame: np.ndarray) -> np.ndarray:
         if hasattr(night_vision, '_last_result') and night_vision._last_result is not None:
             return night_vision._last_result
 
-    # LAB conversion -> Equalize L channel -> Back to BGR
+    # LAB conversion -> CLAHE on L channel -> Back to BGR
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    l_eq = cv2.equalizeHist(l)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_eq = clahe.apply(l)
     lab_eq = cv2.merge((l_eq, a, b))
     bgr_eq = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
 
-    # Multiply green channel by 1.2
+    # Bilateral filter — reduces noise while preserving edges
+    bgr_eq = cv2.bilateralFilter(bgr_eq, 9, 75, 75)
+
+    # Boost green channel by 1.3x for classic night vision look
     out = bgr_eq.astype(np.float32)
-    out[:, :, 1] = np.clip(out[:, :, 1] * 1.2, 0, 255)
+    out[:, :, 1] = np.clip(out[:, :, 1] * 1.3, 0, 255)
+    # Slight brightness reduction to simulate low-light
+    out = np.clip(out * 0.9 + 10, 0, 255)
 
     result = out.astype(np.uint8)
     night_vision._last_result = result

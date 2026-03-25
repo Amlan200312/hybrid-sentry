@@ -75,17 +75,17 @@ security = HTTPBearer(auto_error=False)
 
 
 # ─────────────────────────────────────────
-# PIN HASHING
+# PASSWORD HASHING
 # ─────────────────────────────────────────
-def hash_pin(pin: str) -> str:
-    """Hash a PIN string using bcrypt."""
-    return bcrypt.hashpw(pin.encode(), bcrypt.gensalt()).decode()
+def hash_password(password: str) -> str:
+    """Hash a password string using bcrypt."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
-def verify_pin(pin: str, pin_hash: str) -> bool:
-    """Verify a plain PIN against its bcrypt hash."""
+def verify_password(password: str, pin_hash: str) -> bool:
+    """Verify a plain password against its bcrypt hash."""
     try:
-        return bcrypt.checkpw(pin.encode(), pin_hash.encode())
+        return bcrypt.checkpw(password.encode(), pin_hash.encode())
     except Exception:
         return False
 
@@ -144,13 +144,13 @@ def _clear_failures(username: str):
 def authenticate_user(
     db: Session,
     username: str,
-    pin: str,
+    password: str,
     ip: str = "",
     device_info: str = "",
 ) -> dict:
     """
     Attempt to authenticate user. Returns token payload or raises HTTPException.
-    Enforces lockout after 3 wrong PINs.
+    Enforces lockout after 3 wrong passwords.
     """
     # Lockout check
     locked, remaining = _is_locked(username)
@@ -183,7 +183,7 @@ def authenticate_user(
             detail="ACCESS DENIED — Invalid credentials.",
         )
 
-    if not verify_pin(pin, user.pin_hash):
+    if not verify_password(password, user.pin_hash):
         _log(False)
         _record_failure(username)
         locked2, remaining2 = _is_locked(username)
@@ -194,7 +194,7 @@ def authenticate_user(
             )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="ACCESS DENIED — Invalid PIN.",
+            detail="ACCESS DENIED — Invalid password.",
         )
 
     # Success
@@ -325,7 +325,7 @@ def ws_authenticate(token: str) -> Optional[dict]:
 def create_user(
     db: Session,
     username: str,
-    pin: str,
+    password: str,
     role: str,
     display_name: str = "",
     operator_id: str = "",
@@ -343,18 +343,12 @@ def create_user(
     if existing:
         raise ValueError(f"Username '{username}' already exists.")
 
-    if role == "admin" and len(pin) != 8:
-        raise ValueError("Admin PIN must be 8 digits.")
-    if role == "monitor" and len(pin) != 6:
-        raise ValueError("Monitor PIN must be 6 digits.")
-    if role == "recorder" and len(pin) != 4:
-        raise ValueError("Recorder PIN must be 4 digits.")
-    if not pin.isdigit():
-        raise ValueError("PIN must be numeric only.")
+    if len(password) < 6:
+        raise ValueError("Password must be at least 6 characters.")
 
     user = User(
         username=username,
-        pin_hash=hash_pin(pin),
+        pin_hash=hash_password(password),
         role=role,
         display_name=display_name or username,
         operator_id=operator_id,
@@ -373,27 +367,27 @@ def create_user(
     return user
 
 
-def change_pin(db: Session, username: str, old_pin: str, new_pin: str) -> bool:
-    """Change a user's PIN after verifying the old one."""
+def change_password(db: Session, username: str, old_password: str, new_password: str) -> bool:
+    """Change a user's password after verifying the old one."""
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise ValueError("User not found.")
-    if not verify_pin(old_pin, user.pin_hash):
-        raise ValueError("Current PIN incorrect.")
-    if not new_pin.isdigit():
-        raise ValueError("PIN must be numeric only.")
-    user.pin_hash = hash_pin(new_pin)
+    if not verify_password(old_password, user.pin_hash):
+        raise ValueError("Current password incorrect.")
+    if len(new_password) < 6:
+        raise ValueError("Password must be at least 6 characters.")
+    user.pin_hash = hash_password(new_password)
     db.commit()
     return True
 
 
-def reset_pin_admin(db: Session, target_username: str, new_pin: str) -> bool:
-    """Admin-only: reset a user's PIN without requiring old PIN."""
+def reset_password_admin(db: Session, target_username: str, new_password: str) -> bool:
+    """Admin-only: reset a user's password without requiring old password."""
     user = db.query(User).filter(User.username == target_username).first()
     if not user:
         raise ValueError("User not found.")
-    if not new_pin.isdigit():
-        raise ValueError("PIN must be numeric only.")
-    user.pin_hash = hash_pin(new_pin)
+    if len(new_password) < 6:
+        raise ValueError("Password must be at least 6 characters.")
+    user.pin_hash = hash_password(new_password)
     db.commit()
     return True

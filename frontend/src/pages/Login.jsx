@@ -112,8 +112,9 @@ export default function Login() {
   const navigate = useNavigate()
 
   const [username, setUsername]         = useState('')
-  const [pin, setPin] = useState('')
-  const [showPin, setShowPin]           = useState(false)
+  const [password, setPassword]         = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [rememberMe, setRememberMe]     = useState(false)
   const [loading, setLoading]           = useState(false)
   const [slowWarning, setSlowWarning]   = useState(false)
   const [error, setError]               = useState('')
@@ -134,20 +135,26 @@ export default function Login() {
 
   /* Redirect if already logged in */
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    const user = localStorage.getItem('user')
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
+    const user = localStorage.getItem('user') || sessionStorage.getItem('user')
     if (!token || !user) return
     try {
       const payload = JSON.parse(atob(token.split('.')[1]))
       if (payload.exp * 1000 < Date.now()) {
-        localStorage.clear()
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        sessionStorage.removeItem('token')
+        sessionStorage.removeItem('user')
         return
       }
       const u = JSON.parse(user)
       if (u.role === 'recorder') window.location.replace('/recorder')
       else if (u.role === 'admin') window.location.replace('/role-select')
       else window.location.replace('/monitor')
-    } catch { localStorage.clear() }
+    } catch { 
+      localStorage.clear() 
+      sessionStorage.clear()
+    }
   }, [])
 
   /* Health check */
@@ -168,15 +175,11 @@ export default function Login() {
 
   useEffect(() => { usernameRef.current?.focus() }, [])
 
-  /* Keyboard PIN entry */
+  /* Keyboard entry */
   const handleKey = useCallback((e) => {
     if (lockout || loading) return
-    if (e.key >= '0' && e.key <= '9') {
-      setPin(prev => prev.length < MAX_PIN ? prev + e.key : prev)
-    } else if (e.key === 'Backspace') {
-      setPin(prev => prev.slice(0, -1))
-    } else if (e.key === 'Enter') handleSubmit()
-  }, [lockout, loading, pin, username]) // eslint-disable-line
+    if (e.key === 'Enter') handleSubmit()
+  }, [lockout, loading, username, password]) // eslint-disable-line
 
   useEffect(() => {
     window.addEventListener('keydown', handleKey)
@@ -185,92 +188,94 @@ export default function Login() {
 
   /* Submit */
   const handleSubmit = async () => {
-    const pinStr = Array.isArray(pin) ? pin.join('') : pin;
-    if (!username.trim() || !pinStr.trim()) return
-    setLoading(true)
-    setError('')
+    const passwordStr = Array.isArray(password) ? password.join('') : password;
+    if (!username.trim() || !passwordStr.trim()) return;
+    setLoading(true);
+    setError('');
     try {
       const res = await fetch('http://localhost:8000/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username.trim(), pin: pinStr.trim() })
-      })
-      const data = await res.json()
+        body: JSON.stringify({ username: username.trim(), password: passwordStr.trim() })
+      });
+      const data = await res.json();
       if (res.ok) {
-        localStorage.setItem('user', JSON.stringify(data))
-        localStorage.setItem('token', data.access_token)
-        if (data.role === 'recorder') window.location.href = '/recorder'
-        else if (data.role === 'admin') window.location.href = '/role-select'
-        else window.location.href = '/monitor'
+        // Store token and user data **before** redirect
+        localStorage.setItem('token', data.access_token);
+        localStorage.setItem('user', JSON.stringify(data));
+        // Small delay to ensure storage is written
+        setTimeout(() => {
+          if (data.role === 'recorder') {
+            window.location.href = '/recorder';
+          } else if (data.role === 'admin') {
+            window.location.href = '/role-select';
+          } else {
+            window.location.href = '/monitor';
+          }
+        }, 100);
       } else {
-        setError(typeof data.detail === 'string' ? data.detail : 'Login failed')
+        setError(typeof data.detail === 'string' ? data.detail : 'Login failed');
       }
     } catch {
-      setError('Cannot reach server. Start backend first.')
+      setError('Cannot reach server. Start backend first.');
+      setServerError(true);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   function triggerShake() { setShake(true); setTimeout(() => setShake(false), 600) }
   function fmtLock(s) { return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` }
 
   /* ── Styles ─────────────────────────────────────────────── */
   const s = {
-    page:  { minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center',
-              background:'#0d1117', fontFamily:"'Inter', sans-serif", padding:'24px 16px' },
-    card:  { background:'#161b22', border:'1px solid #30363d', borderRadius:12,
-              padding:'36px 32px', width:'100%', maxWidth:420, boxShadow:'0 16px 48px #00000088',
-              position:'relative', overflow:'hidden' },
-    orgName:{ color:'#e6edf3', fontSize:22, fontWeight:700, marginTop:10, marginBottom:2, textAlign:'center' },
-    sub:   { color:'#8b949e', fontSize:12, textAlign:'center', marginBottom:24 },
-    label: { display:'block', color:'#8b949e', fontSize:11, fontWeight:500,
-              textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:6 },
-    input: { width:'100%', background:'#0d1117', border:'1px solid #30363d', borderRadius:6,
-              padding:'9px 12px', color:'#e6edf3', fontSize:14, outline:'none', boxSizing:'border-box' },
-    fieldRow:{ marginBottom:18 },
-    pinLabelRow:{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 },
-    pinHint:{ color:'#6e7681', fontSize:11 },
-    pinWrap:{ display:'flex', alignItems:'center', gap:8 },
-    pinBoxes:{ display:'flex', gap:5, flex:1, flexWrap:'wrap' },
-    box: (filled) => ({ width:34, height:38, background:'#0d1117',
-      border:`1px solid ${filled ? '#388bfd' : '#30363d'}`, borderRadius:6,
-      display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, color:'#e6edf3' }),
-    eyeBtn:{ background:'none', border:'none', color:'#8b949e', cursor:'pointer', padding:4, display:'flex' },
-    btn: (l) => ({ width:'100%', background: l ? '#1f6feb' : '#388bfd', color:'#fff', border:'none',
-      borderRadius:6, padding:'10px 16px', fontSize:14, fontWeight:500, cursor: l?'not-allowed':'pointer',
-      marginTop:20, display:'flex', alignItems:'center', justifyContent:'center', gap:8 }),
-    error:    { background:'#2d1117', border:'1px solid #f8514966', borderRadius:6,
-                padding:'10px 14px', color:'#f85149', fontSize:13, marginTop:12 },
-    lockout:  { background:'#2d1f00', border:'1px solid #e3b34166', borderRadius:6,
-                padding:'10px 14px', color:'#e3b341', fontSize:13, marginTop:12 },
-    slowWarn: { background:'#162032', border:'1px solid #388bfd44', borderRadius:6,
-                padding:'8px 14px', color:'#8b949e', fontSize:12, marginTop:12 },
-    footer:   { textAlign:'center', marginTop:22 },
-    link:     { color:'#8b949e', fontSize:13, textDecoration:'none' },
-    linkAccent:{ color:'#388bfd' },
-    statusToggle:{ background:'none', border:'none', color:'#8b949e', cursor:'pointer',
-      fontSize:11, padding:0, display:'flex', alignItems:'center', gap:4, margin:'0 auto', marginTop:18 },
-    granted:  { position:'absolute', inset:0, background:'#0d1117ee', display:'flex',
-      flexDirection:'column', alignItems:'center', justifyContent:'center',
-      gap:12, zIndex:10 },
-  }
-
-  /* ── ACCESS GRANTED overlay ── */
-  if (granted) {
-    return (
-      <div style={s.page}>
-        <div style={s.card}>
-          <div className="access-granted" style={s.granted}>
-            <ShieldIcon granted />
-            <div style={{ fontFamily:"'Orbitron', sans-serif", fontSize:18, fontWeight:700,
-              color:'#3fb950', letterSpacing:'0.2em', textShadow:'0 0 16px #3fb95088' }}>
-              ACCESS GRANTED
-            </div>
-          </div>
-        </div>
-      </div>
-    )
+    page: { 
+      minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center',
+      background:'linear-gradient(135deg, #0d1117 0%, #161b22 100%)', 
+      fontFamily:"'Inter', sans-serif", padding:'24px 16px' 
+    },
+    card: { 
+      background:'var(--bg-surface, #161b22)', border:'1px solid var(--border, #30363d)', 
+      borderRadius:16, padding:'40px 32px', width:'100%', maxWidth:420, 
+      boxShadow:'0 24px 64px rgba(0,0,0,0.4)', position:'relative', overflow:'hidden' 
+    },
+    header: { textAlign:'center', marginBottom:32 },
+    orgName: { color:'var(--text-primary, #e6edf3)', fontSize:24, fontWeight:700, marginTop:16, marginBottom:4, letterSpacing:'-0.02em' },
+    sub: { color:'var(--text-muted, #8b949e)', fontSize:14 },
+    label: { display:'block', color:'var(--text-secondary, #8b949e)', fontSize:12, fontWeight:500, marginBottom:8 },
+    inputWrapper: { position:'relative', marginBottom:20 },
+    input: { 
+      width:'100%', background:'var(--bg-base, #0d1117)', border:'1px solid var(--border, #30363d)', 
+      borderRadius:8, padding:'12px 14px', color:'var(--text-primary, #e6edf3)', fontSize:15, 
+      outline:'none', transition:'border-color 0.2s', boxSizing:'border-box' 
+    },
+    eyeBtn: { 
+      position:'absolute', right:12, top:30, background:'none', border:'none', 
+      color:'var(--text-muted, #8b949e)', cursor:'pointer', padding:4, display:'flex' 
+    },
+    optionsRow: { display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24, marginTop:-4 },
+    checkboxLabel: { display:'flex', alignItems:'center', gap:8, color:'var(--text-secondary, #8b949e)', fontSize:13, cursor:'pointer' },
+    link: { color:'var(--accent-blue, #388bfd)', fontSize:13, textDecoration:'none', fontWeight:500, transition:'color 0.2s' },
+    btn: { 
+      width:'100%', background:'var(--accent-blue, #388bfd)', color:'#fff', border:'none',
+      borderRadius:8, padding:'12px', fontSize:15, fontWeight:600, cursor: loading ? 'not-allowed' : 'pointer',
+      display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+      transition:'all 0.2s', opacity: loading ? 0.7 : 1, boxShadow:'0 4px 12px rgba(56, 139, 253, 0.2)'
+    },
+    error: { 
+      background:'rgba(248, 81, 73, 0.1)', border:'1px solid rgba(248, 81, 73, 0.4)', 
+      borderRadius:8, padding:'12px', color:'#f85149', fontSize:13, marginTop:16,
+      display:'flex', alignItems:'center', justifyContent:'space-between'
+    },
+    footer: { textAlign:'center', marginTop:28 },
+    statusToggle: { 
+      background:'none', border:'none', color:'var(--text-muted, #8b949e)', cursor:'pointer',
+      fontSize:12, padding:0, display:'flex', alignItems:'center', gap:6, margin:'0 auto', marginTop:24 
+    },
+    granted: { 
+      position:'absolute', inset:0, background:'rgba(13, 17, 23, 0.95)', display:'flex',
+      flexDirection:'column', alignItems:'center', justifyContent:'center', gap:16, zIndex:10 
+    },
   }
 
   /* ── Loading overlay (submitting) ── */
@@ -286,86 +291,92 @@ export default function Login() {
   return (
     <div style={s.page}>
       <div style={s.card} className="hs-fade">
-
-        {/* Header */}
-        <div style={{ textAlign:'center', marginBottom:4 }}>
+        <div style={s.header}>
           <ShieldIcon />
           <div style={s.orgName}>{orgName}</div>
           <div style={s.sub}>Hybrid Sentry Surveillance</div>
         </div>
 
-        {/* Username */}
-        <div style={s.fieldRow}>
-          <label style={s.label}>Username</label>
-          <input ref={usernameRef} style={s.input} value={username}
-            onChange={e => setUsername(e.target.value)} placeholder="Enter username"
-            autoComplete="username" disabled={lockout}
-            onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-            onFocus={e => { e.target.style.borderColor='#388bfd' }}
-            onBlur={e => { e.target.style.borderColor='#30363d' }} />
-        </div>
-
-        {/* PIN */}
-        <div style={s.fieldRow}>
-          <div style={s.pinLabelRow}>
-            <label style={{ ...s.label, marginBottom:0 }}>PIN</label>
-            <span style={s.pinHint}>Admin:8 · Monitor:6 · Recorder:4</span>
+        <form onSubmit={e => { e.preventDefault(); handleSubmit(); }}>
+          <div style={s.inputWrapper}>
+            <label style={s.label}>Username</label>
+            <input 
+              ref={usernameRef} style={s.input} value={username}
+              onChange={e => setUsername(e.target.value)} placeholder="Enter your username"
+              autoComplete="username" disabled={lockout || loading}
+              onFocus={e => e.target.style.borderColor = 'var(--accent-blue, #388bfd)'}
+              onBlur={e => e.target.style.borderColor = 'var(--border, #30363d)'} 
+            />
           </div>
-          <div style={s.pinWrap}>
-            <div style={s.pinBoxes} className={shake ? 'pin-shake' : ''}>
-              {Array.from({ length: MAX_PIN }).map((_,i) => {
-                const filled = i < pin.length
-                return (
-                  <div key={i} style={s.box(filled)}>
-                    {filled ? (showPin ? pin[i] : '●') : ''}
-                  </div>
-                )
-              })}
-            </div>
-            <button style={s.eyeBtn} onClick={() => setShowPin(v => !v)} tabIndex={-1}>
-              {showPin
+
+          <div style={s.inputWrapper}>
+            <label style={s.label}>Password</label>
+            <input 
+              style={s.input} type={showPassword ? "text" : "password"} value={password}
+              onChange={e => setPassword(e.target.value)} placeholder="Enter your password"
+              autoComplete="current-password" disabled={lockout || loading}
+              onFocus={e => e.target.style.borderColor = 'var(--accent-blue, #388bfd)'}
+              onBlur={e => e.target.style.borderColor = 'var(--border, #30363d)'} 
+            />
+            <button style={s.eyeBtn} onClick={() => setShowPassword(v => !v)} tabIndex={-1} type="button">
+              {showPassword
                 ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                 : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               }
             </button>
           </div>
-        </div>
 
-        {/* Submit */}
-        <button style={s.btn(false)} onClick={handleSubmit} disabled={lockout}
-          onMouseEnter={e => { e.currentTarget.style.background='#58a6ff' }}
-          onMouseLeave={e => { e.currentTarget.style.background='#388bfd' }}>
-          Sign In
-        </button>
+          <div style={s.optionsRow}>
+            <label style={s.checkboxLabel}>
+              <input 
+                type="checkbox" checked={rememberMe} 
+                onChange={e => setRememberMe(e.target.checked)} 
+                disabled={lockout || loading} 
+                style={{ accentColor: 'var(--accent-blue, #388bfd)' }}
+              />
+              Remember me
+            </label>
+            <a href="#" style={s.link} onClick={e => e.preventDefault()}>
+              Forgot password?
+            </a>
+          </div>
 
-        {/* Error states */}
+          <button 
+            style={s.btn} type="submit" disabled={lockout || loading}
+            onMouseEnter={e => !loading && (e.currentTarget.style.transform = 'translateY(-1px)')}
+            onMouseLeave={e => !loading && (e.currentTarget.style.transform = 'translateY(0)')}
+          >
+            {loading ? <><svg style={{ animation: 'spin 1s linear infinite' }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Authenticating...</> : 'Sign In'}
+          </button>
+        </form>
+
         {serverError && (
           <div style={s.error}>
-            ⚠ Cannot reach server.
-            <button onClick={handleSubmit} style={{ marginLeft:10, background:'none',
-              border:'none', color:'#388bfd', cursor:'pointer', fontSize:13 }}>
-              ↺ Retry
+            <span>⚠ Cannot reach server</span>
+            <button type="button" onClick={() => { setServerError(false); handleSubmit(); }} style={{ background:'none', border:'none', color:'#f85149', cursor:'pointer', fontSize:13, fontWeight:600 }}>
+              Retry
             </button>
           </div>
         )}
+        
         {error && !lockout && !serverError && (
-          <div style={{color:'#f85149',fontSize:12,marginTop:8,textAlign:'center'}}>
-            {typeof error === 'string' ? error : 'Login failed'}
+          <div style={{ ...s.error, justifyContent: 'center' }}>
+            {error}
           </div>
         )}
+        
         {lockout && (
-          <div style={s.lockout}>⚠ Too many attempts. Try again in {fmtLock(lockSeconds)}</div>
+          <div style={{ ...s.error, color: '#e3b341', borderColor: 'rgba(227, 179, 65, 0.4)', background: 'rgba(227, 179, 65, 0.1)', justifyContent: 'center' }}>
+            ⚠ Too many attempts. Try again in {fmtLock(lockSeconds)}
+          </div>
         )}
 
-        {/* Footer / Register link */}
         <div style={s.footer}>
-          <Link to="/register" style={s.link}>
-            New here? <span style={s.linkAccent}>Create account →</span>
-          </Link>
+          <span style={{ color: 'var(--text-secondary, #8b949e)', fontSize: 13 }}>Don't have an account? </span>
+          <Link to="/register" style={s.link}>Create one →</Link>
         </div>
 
-        {/* System Status toggle */}
-        <button style={s.statusToggle} onClick={() => setStatusOpen(o => !o)}>
+        <button type="button" style={s.statusToggle} onClick={() => setStatusOpen(o => !o)}>
           ⚙️ System Status {statusOpen ? '▲' : '▼'}
         </button>
         {statusOpen && <SystemStatusPanel info={sysInfo} />}

@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
 import markerIcon from 'leaflet/dist/images/marker-icon.png'
 import markerShadow from 'leaflet/dist/images/marker-shadow.png'
+import { authFetch } from '../utils/api'
 
 // Fix Leaflet default icons
 delete L.Icon.Default.prototype._getIconUrl
@@ -14,7 +15,6 @@ L.Icon.Default.mergeOptions({
   shadowUrl: markerShadow,
 })
 
-// Custom colored icons
 function coloredIcon(color) {
   return L.divIcon({
     html: `<div style="
@@ -29,13 +29,37 @@ function coloredIcon(color) {
   })
 }
 
-const API = 'http://localhost:8000'
+const ZONE_COLORS = {
+  restricted: '#f85149',
+  alert: '#d29922',
+  safe: '#3fb950',
+  perimeter: '#388bfd',
+}
+
+function getZoneColor(type) {
+  return ZONE_COLORS[type] || '#8b949e'
+}
+
+// Extract center lat/lng from coordinates array
+function zoneCenter(coords) {
+  if (!coords || !coords.length) return null
+  const c = coords[0]
+  if (c && c.lat !== undefined) return [c.lat, c.lng]
+  return null
+}
 
 export default function GPSMapPage() {
   const [recorders, setRecorders] = useState([])
   const [weather, setWeather]     = useState(null)
   const [loading, setLoading]     = useState(true)
   const [mapRef, setMapRef]       = useState(null)
+
+  const [zones, setZones]           = useState([])
+  const [zonesLoading, setZonesLoading] = useState(true)
+  const [showAddZone, setShowAddZone]  = useState(false)
+  const [newZone, setNewZone] = useState({ zone_name: '', zone_type: 'restricted', lat: '', lng: '', radius: 200 })
+  const [addingZone, setAddingZone] = useState(false)
+  const [userRole, setUserRole] = useState(null)
 
   useEffect(() => {
     const token = sessionStorage.getItem('hs_token')
@@ -51,7 +75,49 @@ export default function GPSMapPage() {
       setWeather(w)
       setLoading(false)
     })
+
+    // Get current user role
+    authFetch('/api/auth/me').then(r => r?.json()).then(me => {
+      if (me?.role) setUserRole(me.role)
+    }).catch(() => {})
+
+    fetchZones()
   }, [])
+
+  const fetchZones = () => {
+    setZonesLoading(true)
+    authFetch('/api/zones').then(r => r?.json()).then(data => {
+      setZones(Array.isArray(data) ? data : [])
+      setZonesLoading(false)
+    }).catch(() => setZonesLoading(false))
+  }
+
+  const handleAddZone = async () => {
+    if (!newZone.zone_name || !newZone.lat || !newZone.lng) return
+    setAddingZone(true)
+    const lat = parseFloat(newZone.lat)
+    const lng = parseFloat(newZone.lng)
+    const coords = [{ lat, lng }]
+    await authFetch('/api/zones', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        zone_name: newZone.zone_name,
+        zone_type: newZone.zone_type,
+        coordinates: coords,
+        camera_id: 'GPS',
+      }),
+    }).catch(() => {})
+    setAddingZone(false)
+    setShowAddZone(false)
+    setNewZone({ zone_name: '', zone_type: 'restricted', lat: '', lng: '', radius: 200 })
+    fetchZones()
+  }
+
+  const handleDeleteZone = async (id) => {
+    await authFetch(`/api/zones/${id}`, { method: 'DELETE' }).catch(() => {})
+    fetchZones()
+  }
 
   // India center
   const center = [20.5937, 78.9629]
@@ -75,6 +141,7 @@ export default function GPSMapPage() {
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               attribution='&copy; OpenStreetMap contributors'
             />
+            {/* Recorder markers */}
             {recorders.map(rec => {
               const lat = rec.latitude || rec.lat
               const lng = rec.longitude || rec.lng
@@ -96,6 +163,28 @@ export default function GPSMapPage() {
                     </div>
                   </Popup>
                 </Marker>
+              )
+            })}
+            {/* Zone circles */}
+            {zones.map(zone => {
+              const center = zoneCenter(zone.coordinates)
+              if (!center) return null
+              const color = getZoneColor(zone.zone_type)
+              return (
+                <Circle
+                  key={zone.id}
+                  center={center}
+                  radius={300}
+                  pathOptions={{ color, fillColor: color, fillOpacity: 0.15, weight: 2 }}
+                >
+                  <Popup>
+                    <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 12 }}>
+                      <strong>{zone.zone_name}</strong><br />
+                      Type: <span style={{ color }}>{zone.zone_type}</span><br />
+                      Created by: {zone.created_by}
+                    </div>
+                  </Popup>
+                </Circle>
               )
             })}
           </MapContainer>
@@ -133,9 +222,7 @@ export default function GPSMapPage() {
             {loading ? (
               <div className="skeleton" style={{ height: 80 }} />
             ) : recorders.length === 0 ? (
-              <div className="empty-state" style={{ padding: '12px 0' }}>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No recorders found</div>
-              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '12px 0' }}>No recorders found</div>
             ) : (
               recorders.map(rec => {
                 const lat = rec.latitude || rec.lat
@@ -168,16 +255,88 @@ export default function GPSMapPage() {
           </div>
         </div>
 
-        {/* Base zones */}
+        {/* GPS Zones */}
         <div className="panel">
-          <div className="panel-header">Base Zones</div>
+          <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>GPS Zones</span>
+            {userRole === 'admin' && (
+              <button
+                className="btn btn-secondary btn-xs"
+                onClick={() => setShowAddZone(v => !v)}
+              >
+                {showAddZone ? '✕ Cancel' : '+ Add'}
+              </button>
+            )}
+          </div>
           <div className="panel-body">
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '10px 0' }}>
-              No zones configured
-            </div>
-            <button className="btn btn-secondary btn-xs btn-full" style={{ marginTop: 6 }}>
-              + Add Zone
-            </button>
+            {/* Add zone form (admin only) */}
+            {showAddZone && userRole === 'admin' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12, padding: '8px', background: 'var(--bg-elevated)', borderRadius: 6 }}>
+                <input
+                  className="input-field"
+                  placeholder="Zone name"
+                  value={newZone.zone_name}
+                  onChange={e => setNewZone(v => ({ ...v, zone_name: e.target.value }))}
+                  style={{ fontSize: 11 }}
+                />
+                <select
+                  className="input-field"
+                  value={newZone.zone_type}
+                  onChange={e => setNewZone(v => ({ ...v, zone_type: e.target.value }))}
+                  style={{ fontSize: 11 }}
+                >
+                  <option value="restricted">Restricted</option>
+                  <option value="alert">Alert</option>
+                  <option value="safe">Safe</option>
+                  <option value="perimeter">Perimeter</option>
+                </select>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                  <input className="input-field" placeholder="Latitude" value={newZone.lat}
+                    onChange={e => setNewZone(v => ({ ...v, lat: e.target.value }))} style={{ fontSize: 11 }} />
+                  <input className="input-field" placeholder="Longitude" value={newZone.lng}
+                    onChange={e => setNewZone(v => ({ ...v, lng: e.target.value }))} style={{ fontSize: 11 }} />
+                </div>
+                <button className="btn btn-primary btn-xs" onClick={handleAddZone} disabled={addingZone}>
+                  {addingZone ? 'Saving...' : '✓ Create Zone'}
+                </button>
+              </div>
+            )}
+
+            {/* Zone list */}
+            {zonesLoading ? (
+              <div className="skeleton" style={{ height: 60 }} />
+            ) : zones.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '10px 0' }}>
+                No zones configured
+              </div>
+            ) : (
+              zones.map(zone => {
+                const color = getZoneColor(zone.zone_type)
+                const center = zoneCenter(zone.coordinates)
+                return (
+                  <div key={zone.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0',
+                    borderBottom: '1px solid var(--bg-elevated)', fontSize: 12,
+                  }}>
+                    <div style={{ width: 10, height: 10, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{zone.zone_name}</div>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'capitalize' }}>{zone.zone_type}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                      {center && mapRef && (
+                        <button className="btn btn-ghost btn-xs" style={{ padding: '2px 5px', fontSize: 9 }}
+                          onClick={() => mapRef.flyTo(center, 14)}>📍</button>
+                      )}
+                      {userRole === 'admin' && (
+                        <button className="btn btn-ghost btn-xs" style={{ padding: '2px 5px', fontSize: 9, color: 'var(--accent-red)' }}
+                          onClick={() => handleDeleteZone(zone.id)}>✕</button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })
+            )}
           </div>
         </div>
 

@@ -8,7 +8,6 @@ import { authFetch, getUser } from '../utils/api'
 
 const MONITOR_ITEMS = [
   { id: 'live-feeds',   label: 'Live Feeds',   icon: Monitor },
-  { id: 'event-log',    label: 'Event Log',    icon: List },
   { id: 'verify-queue', label: 'Verify Queue', icon: AlertTriangle, badge: 'verify' },
   { id: 'field-comms',  label: 'Field Comms',  icon: Radio,         badge: 'comms' },
   { id: 'gps-map',      label: 'GPS Map',      icon: Map },

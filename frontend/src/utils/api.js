@@ -1,10 +1,10 @@
 export const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 export const WS = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
 
-export const getToken = () => localStorage.getItem('token')
+export const getToken = () => localStorage.getItem('token') || sessionStorage.getItem('token')
 
 export const getUser = () => {
-  const user = localStorage.getItem('user')
+  const user = localStorage.getItem('user') || sessionStorage.getItem('user')
   try {
     return user ? JSON.parse(user) : null
   } catch (e) {

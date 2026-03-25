@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Sidebar from '../components/Sidebar'
 import LiveFeedsPage     from '../components/LiveFeedsPage'
-import EventLogPage      from '../components/EventLogPage'
 import VerifyQueuePage   from '../components/VerifyQueuePage'
 import FieldCommsPage    from '../components/FieldCommsPage'
 import GPSMapPage        from '../components/GPSMapPage'
@@ -18,7 +17,6 @@ const API = 'http://localhost:8000'
 
 const PAGE_LABELS = {
   'live-feeds':    'Live Feeds',
-  'event-log':     'Event Log',
   'verify-queue':  'Verify Queue',
   'field-comms':   'Field Communications',
   'gps-map':       'GPS Map',
@@ -93,7 +91,6 @@ export default function MonitorDashboard() {
   function renderPage() {
     switch (view) {
       case 'live-feeds':    return <LiveFeedsPage />
-      case 'event-log':    return <EventLogPage />
       case 'verify-queue':  return <VerifyQueuePage />
       case 'field-comms':  return <FieldCommsPage />
       case 'gps-map':      return <GPSMapPage />
