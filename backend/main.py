@@ -42,10 +42,6 @@ from auth import (
 from multi_feed import feed_manager
 from system_stats import system_stats
 from gps import gps_manager, handle_recorder_gps_ws, handle_monitor_gps_ws
-from voice_comms import (
-    handle_voice_ws, voice_client_manager,
-    acknowledge_message, send_reply, load_vosk_models
-)
 from recording import recording_manager
 from reports import generate_pdf_report, generate_csv_report
 from sensors import init_sensors, get_sensors
@@ -97,11 +93,17 @@ _detection_ws_list: List[WebSocket] = []
 from collections import deque as _deque
 _system_logs: _deque = _deque(maxlen=200)
 
+# Main event loop (captured at startup for thread-safe coroutine scheduling)
+_main_loop = None
+
 # ─────────────────────────────────────────
 # STARTUP / SHUTDOWN
 # ─────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+
     # Initialize database
     init_db()
 
@@ -112,9 +114,6 @@ async def startup():
     import threading as _threading
     _threading.Thread(target=detection.initialize_model, daemon=True).start()
     print("[MAIN] YOLO model pre-load started (background)")
-
-    # Load VOSK models
-    load_vosk_models()
 
     # Initialize sensors (GPIO — simulation on non-RPi)
     def _sound_event_handler(ev: dict):
@@ -127,11 +126,10 @@ async def startup():
     # Start multi-feed manager
     def _detection_callback(camera_id, det, annotated_frame):
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(_handle_detection_event(camera_id, det, annotated_frame))
-            else:
-                loop.run_until_complete(_handle_detection_event(camera_id, det, annotated_frame))
+            asyncio.run_coroutine_threadsafe(
+                _handle_detection_event(camera_id, det, annotated_frame),
+                _main_loop
+            )
         except Exception as e:
             print(f"[MAIN] Detection callback error: {e}")
     feed_manager.detection_callback = _detection_callback
@@ -829,6 +827,60 @@ async def recorder_stream_start(
 # ─────────────────────────────────────────
 # DETECTION / EVENTS
 # ─────────────────────────────────────────
+
+@app.post("/api/test/detection")
+async def test_detection_fake(current_user: dict = Depends(require_any)):
+    """Trigger a fake detection event to test WebSockets."""
+    import asyncio
+    det = {
+        "detected_class": "person",
+        "display_label": "Test Person",
+        "confidence": 0.99,
+        "bbox": [50, 50, 200, 300],
+        "distance_m": 4.2
+    }
+    try:
+        if _main_loop:
+            asyncio.run_coroutine_threadsafe(
+                _handle_detection_event("CAM-01", det, None),
+                _main_loop
+            )
+        else:
+            await _handle_detection_event("CAM-01", det, None)
+        return {"success": True, "message": "Fake detection triggered"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+class DetectionModeUpdate(BaseModel):
+    mode: str  # 'auto', 'full_periodic', 'roi_only', 'full_scan'
+
+@app.get("/api/detection/mode/{camera_id}")
+async def get_detection_mode(
+    camera_id: str,
+    current_user: dict = Depends(require_any),
+):
+    state = feed_manager._cameras.get(camera_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return {"camera_id": camera_id, "mode": getattr(state, "mode", "auto")}
+
+@app.post("/api/detection/mode/{camera_id}")
+async def set_detection_mode(
+    camera_id: str,
+    req: DetectionModeUpdate,
+    current_user: dict = Depends(require_admin_or_monitor),
+):
+    state = feed_manager._cameras.get(camera_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    
+    valid_modes = ["auto", "full_periodic", "roi_only", "full_scan"]
+    if req.mode not in valid_modes:
+        raise HTTPException(status_code=400, detail="Invalid detection mode")
+        
+    state.mode = req.mode
+    return {"camera_id": camera_id, "mode": state.mode}
+
 @app.get("/api/events")
 async def get_events(
     limit: int = 100,
@@ -1056,42 +1108,6 @@ async def get_my_messages(
         for m in msgs
     ]
 
-
-@app.post("/api/comms/messages/{message_id}/ack")
-async def ack_message(
-    message_id: int,
-    req: AckRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(require_admin_or_monitor),
-):
-    result = await acknowledge_message(message_id, current_user["username"], db)
-    if not result:
-        raise HTTPException(404, "Message not found")
-    return result
-
-
-@app.post("/api/comms/messages/{message_id}/reply")
-async def reply_message(
-    message_id: int,
-    req: ReplyRequest,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(require_admin_or_monitor),
-):
-    result = await send_reply(message_id, req.text, current_user["username"], db)
-    if not result:
-        raise HTTPException(404, "Message not found")
-    return result
-
-
-@app.get("/api/comms/audio/{filename}")
-async def download_comms_audio(
-    filename: str,
-    current_user: dict = Depends(require_any),
-):
-    filepath = COMMS_DIR / filename
-    if not filepath.exists():
-        raise HTTPException(404, "Audio file not found")
-    return FileResponse(str(filepath), media_type="audio/wav", filename=filename)
 
 
 # ─────────────────────────────────────────
@@ -1763,18 +1779,6 @@ async def ws_detections(websocket: WebSocket, token: str = ""):
 
 
 # ─────────────────────────────────────────
-# WEBSOCKET — VOICE COMMS
-# ─────────────────────────────────────────
-@app.websocket("/ws/voice/{username}")
-async def ws_voice(websocket: WebSocket, username: str, token: str = ""):
-    payload = ws_authenticate(token)
-    if not payload:
-        await websocket.close(code=4001)
-        return
-    await handle_voice_ws(websocket, username, payload, _monitor_ws_list)
-
-
-# ─────────────────────────────────────────
 # WEBSOCKET — GPS (RECORDER)
 # ─────────────────────────────────────────
 @app.websocket("/ws/gps/recorder")
@@ -1943,12 +1947,6 @@ async def post_comms_alert(
     for ws in dead:
         if ws in _monitor_ws_list:
             _monitor_ws_list.remove(ws)
-
-    # Also broadcast to recorder WebSockets via voice_client_manager
-    try:
-        await voice_client_manager.broadcast_monitors(_monitor_ws_list, alert_payload)
-    except Exception:
-        pass
 
     _system_logs.append({
         "level": "warning",
@@ -2817,6 +2815,16 @@ class GpsAssignRequest(BaseModel):
 @app.post("/api/gps/assign")
 async def assign_gps_monitor(req: GpsAssignRequest, db: Session = Depends(get_db), current_user: dict = Depends(require_admin)):
     return {"success": True}
+
+@app.get("/api/weather")
+async def get_weather():
+    stats = system_stats.get()
+    return {
+        "temperature": stats.get("outside_temp_c", None),
+        "weather_code": stats.get("weather_code", None),
+        "wind_speed": None,
+        "humidity": None
+    }
 
 @app.get("/api/weather/tiles/{z}/{x}/{y}")
 async def get_weather_tile(z: int, x: int, y: int):

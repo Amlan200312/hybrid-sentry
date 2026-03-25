@@ -443,7 +443,17 @@ class ImagePipeline:
             _, self._last_motion_rects = background_subtraction(out, self.mog2)
 
         if self.night_mode:
-            out = night_vision(out)
+            # Convert to LAB, CLAHE on L, back to BGR, boost green
+            lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            l_eq = clahe.apply(l)
+            lab_eq = cv2.merge((l_eq, a, b))
+            out = cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
+            # Use float for multiplication to avoid overflow before clipping
+            out = out.astype(np.float32)
+            out[:,:,1] = np.clip(out[:,:,1] * 1.3, 0, 255)
+            out = out.astype(np.uint8)
 
         if self.flow_mode and self.prev_frame is not None:
             out = optical_flow(self.prev_frame, out)

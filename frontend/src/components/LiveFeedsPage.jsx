@@ -1,13 +1,13 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { authFetch, authWS, getToken, API } from '../utils/api'
-import { AlertOctagon, Hand, Maximize2, Bell, Radio, Video, Download, Camera, X, Menu, Grid, Monitor } from 'lucide-react'
+import { X, RefreshCw, Moon, Sun, ChevronDown } from 'lucide-react'
 
-// ── Event Modal: clip + OCR + distance ───────────────────────────────────────
+// ── Event Modal ───────────────────────────────────────────────────────────────
 function EventModal({ event, onClose }) {
   const [ocr, setOcr] = useState(null)
   const [ocrLoading, setOcrLoading] = useState(false)
   const clipSrc = event?.id
-    ? `http://localhost:8000/api/recordings/clip/${event.id}?token=${getToken()}`
+    ? `${API}/api/recordings/clip/${event.id}?token=${getToken()}`
     : null
 
   const runOcr = async () => {
@@ -26,20 +26,20 @@ function EventModal({ event, onClose }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 1000,
-      background: 'rgba(0,0,0,0.75)', display: 'flex',
+      background: 'rgba(0,0,0,0.82)', display: 'flex',
       alignItems: 'center', justifyContent: 'center', padding: 24
-    }}>
-      <div style={{
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
         background: 'var(--bg-surface)', border: '1px solid var(--border)',
         borderRadius: 12, width: '100%', maxWidth: 820, overflow: 'hidden'
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
-          <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontWeight: 700 }}>{event?.display_label || event?.detected_class || event?.label || 'Detection'}</span>
-            <span className="badge badge-blue" style={{ marginLeft: 10 }}>{Math.round((event?.confidence || 0) * 100)}% conf</span>
-            {event?.camera_id && <span className="badge badge-muted" style={{ marginLeft: 6 }}>{event.camera_id}</span>}
+            <span className="badge badge-blue">{Math.round((event?.confidence || 0) * 100)}% conf</span>
+            {event?.camera_id && <span className="badge badge-muted">{event.camera_id}</span>}
             {event?.distance_m != null && (
-              <span className="badge" style={{ marginLeft: 6, background: 'rgba(57,255,20,0.15)', color: '#39ff14', border: '1px solid rgba(57,255,20,0.3)' }}>
+              <span className="badge" style={{ background: 'rgba(57,255,20,0.15)', color: '#39ff14', border: '1px solid rgba(57,255,20,0.3)' }}>
                 ~{event.distance_m}m
               </span>
             )}
@@ -47,7 +47,7 @@ function EventModal({ event, onClose }) {
           <button className="btn btn-ghost btn-sm" onClick={onClose}><X size={16} /></button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 0 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 0 }}>
           <div style={{ padding: 20 }}>
             {clipSrc ? (
               <video key={event.id} src={clipSrc} controls autoPlay loop style={{ width: '100%', borderRadius: 8, background: '#000' }} />
@@ -56,28 +56,20 @@ function EventModal({ event, onClose }) {
                 No clip available
               </div>
             )}
-            {event?.timestamp && (
-              <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
-                {new Date(event.timestamp).toLocaleString()}
-              </div>
-            )}
-            {/* Distance & speed details */}
-            {(event?.distance_m != null || event?.speed_ms != null) && (
-              <div style={{ marginTop: 10, display: 'flex', gap: 12, fontSize: 12 }}>
-                {event.distance_m != null && (
-                  <div style={{ padding: '4px 10px', borderRadius: 8, background: 'rgba(57,255,20,0.1)', border: '1px solid rgba(57,255,20,0.25)', color: '#39ff14', fontWeight: 600 }}>
-                    📏 Distance: {event.distance_m}m
-                  </div>
-                )}
-                {event.speed_ms != null && (
-                  <div style={{ padding: '4px 10px', borderRadius: 8, background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
-                    ⚡ Speed: {event.speed_ms} m/s
-                  </div>
-                )}
-              </div>
-            )}
+            {event?.timestamp && <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>{new Date(event.timestamp).toLocaleString()}</div>}
+            <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 12 }}>
+              {event?.distance_m != null && (
+                <span style={{ padding: '4px 10px', borderRadius: 8, background: 'rgba(57,255,20,0.1)', border: '1px solid rgba(57,255,20,0.25)', color: '#39ff14', fontWeight: 600 }}>
+                  📏 {event.distance_m}m
+                </span>
+              )}
+              {event?.speed_ms != null && (
+                <span style={{ padding: '4px 10px', borderRadius: 8, background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
+                  ⚡ {event.speed_ms} m/s
+                </span>
+              )}
+            </div>
           </div>
-
           <div style={{ borderLeft: '1px solid var(--border)', padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontWeight: 600, fontSize: 13 }}>OCR — Plate / Badge</div>
             {!ocr ? (
@@ -89,18 +81,13 @@ function EventModal({ event, onClose }) {
                 <div style={{ fontSize: 20, fontWeight: 800, fontFamily: 'monospace', color: '#39ff14', letterSpacing: 2 }}>
                   {ocr.text || '—'}
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {(ocr.results || []).map((r, i) => (
-                    <div key={i} style={{ fontSize: 11, display: 'flex', justifyContent: 'space-between', padding: '4px 8px', background: 'var(--bg-elevated)', borderRadius: 6 }}>
-                      <span style={{ fontFamily: 'monospace', color: 'var(--text-primary)' }}>{r.text}</span>
-                      <span style={{ color: 'var(--text-muted)' }}>{Math.round((r.confidence || 0) * 100)}%</span>
-                    </div>
-                  ))}
-                </div>
+                {(ocr.results || []).map((r, i) => (
+                  <div key={i} style={{ fontSize: 11, display: 'flex', justifyContent: 'space-between', padding: '4px 8px', background: 'var(--bg-elevated)', borderRadius: 6 }}>
+                    <span style={{ fontFamily: 'monospace' }}>{r.text}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>{Math.round((r.confidence || 0) * 100)}%</span>
+                  </div>
+                ))}
               </>
-            )}
-            {!event?.screenshot_path && (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No screenshot saved.</div>
             )}
           </div>
         </div>
@@ -109,474 +96,409 @@ function EventModal({ event, onClose }) {
   )
 }
 
-export default function LiveFeedsPage() {
+// ── Label colour coding ───────────────────────────────────────────────────────
+function labelColor(label = '') {
+  const l = label.toLowerCase()
+  if (l.includes('person') || l === 'person') return '#388bfd'
+  if (l.includes('vehicle') || l.includes('car') || l.includes('truck')) return '#d29922'
+  if (l.includes('snake') || l.includes('fire') || l.includes('smoke') || l.includes('weapon') || l.includes('armed')) return '#f85149'
+  return '#57ab5a'
+}
+
+// ── Main Component ────────────────────────────────────────────────────────────
+export default function LiveFeedsPage({ isMobile }) {
   const [streamKey, setStreamKey] = useState(0)
-  const [recorders, setRecorders] = useState([])
-  const [selectedId, setSelectedId] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [streamError, setStreamError] = useState(false)
-  const [detections, setDetections] = useState([])
-  const [liveBoxes, setLiveBoxes] = useState([])
-
+  const [nv, setNv] = useState(false)
+  const [activeCamera, setActiveCamera] = useState('CAM-01')
+  const [detectionMode, setDetectionMode] = useState('auto')
   const [monitorEvents, setMonitorEvents] = useState([])
-  const [cameraFilter, setCameraFilter] = useState('all')
+  const [liveBoxes, setLiveBoxes] = useState([])
   const [selectedEvent, setSelectedEvent] = useState(null)
-  const [sidePanelOpen, setSidePanelOpen] = useState(true)
-  const [recordersExpanded, setRecordersExpanded] = useState(false)
-
-  // View mode: 'single' or 'grid'
-  const [viewMode, setViewMode] = useState('single')
+  const [camFilter, setCamFilter] = useState('ALL')
+  const [recorders, setRecorders] = useState([])
   const [cameras, setCameras] = useState([])
-
   const wsRef = useRef(null)
-  const wsMonitorRef = useRef(null)
-  const boxTimerRef = useRef(null)
 
+  // ── Fetch initial events ─────────────────────────────────────────────────
   useEffect(() => {
-    const interval = setInterval(() => {
-      setStreamKey(prev => prev + 1);
-    }, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // ── Data fetch ──────────────────────────────────────────────────────────────
-  useEffect(() => {
-    authFetch('/api/users?role=recorder')
-      .then(r => r?.json())
-      .then(data => {
-        const list = Array.isArray(data) ? data : []
-        setRecorders(list)
-        const firstOnline = list.find(r => r.status === 'online')
-        const first = firstOnline || list[0]
-        if (first && !selectedId) setSelectedId(first.username || first.id)
-        setLoading(false)
-      })
-      .catch(() => setLoading(false))
-
-    authFetch('/api/detections?limit=5')
-      .then(r => r?.json())
-      .then(data => {
-        const arr = Array.isArray(data) ? data : (data?.items || data?.detections || [])
-        setDetections(arr.slice(0, 5))
-      }).catch(() => {})
-
     authFetch('/api/detections?limit=30')
       .then(r => r?.json())
       .then(data => {
-        const arr = Array.isArray(data) ? data : (data?.items || data?.detections || [])
-        setMonitorEvents(arr.slice(0, 30))
-      }).catch(() => {})
+        if (Array.isArray(data)) setMonitorEvents(data.slice(0, 30))
+      })
+      .catch(() => {})
+  }, [])
 
-    // Fetch cameras for grid view
-    authFetch('/api/feeds')
-      .then(r => r?.json())
-      .then(data => {
-        if (Array.isArray(data)) setCameras(data)
-        else if (data?.cameras) setCameras(data.cameras)
-      }).catch(() => {})
-  }, []) // eslint-disable-line
-
-  // ── Detection WebSocket ─────────────────────────────────────────────────────
+  // ── Fetch recorders list ─────────────────────────────────────────────────
   useEffect(() => {
-    const ws = authWS('/ws/detections')
-    ws.onmessage = (e) => {
+    authFetch('/api/users?role=recorder')
+      .then(r => r?.json())
+      .then(data => { if (Array.isArray(data)) setRecorders(data) })
+      .catch(() => {})
+  }, [])
+
+  // ── Fetch camera list ────────────────────────────────────────────────────
+  useEffect(() => {
+    authFetch('/api/cameras')
+      .then(r => r?.json())
+      .then(data => { if (Array.isArray(data)) setCameras(data) })
+      .catch(() => {})
+  }, [])
+
+  // ── Fetch Detection Mode ─────────────────────────────────────────────────
+  useEffect(() => {
+    authFetch(`/api/detection/mode/${activeCamera}`)
+      .then(r => r?.json())
+      .then(data => { if (data?.mode) setDetectionMode(data.mode) })
+      .catch(() => {})
+  }, [activeCamera])
+
+  const changeDetectionMode = async (e) => {
+    const newMode = e.target.value;
+    setDetectionMode(newMode);
+    await authFetch(`/api/detection/mode/${activeCamera}`, {
+      method: 'POST',
+      body: JSON.stringify({ mode: newMode })
+    }).catch(() => {})
+  }
+
+  // ── WebSocket /ws/monitor ────────────────────────────────────────────────
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.readyState <= 1) return
+    wsRef.current = authWS('/ws/monitor')
+    wsRef.current.onmessage = (ev) => {
       try {
-        const msg = JSON.parse(e.data)
-        console.log('[WS/detections] message:', msg)  // debug
-        if (msg.type === 'detection' && msg.data) {
-          setDetections(prev => [msg.data, ...prev].slice(0, 5))
-          if (msg.data.boxes && msg.data.boxes.length > 0) {
-            setLiveBoxes(msg.data.boxes)
-            clearTimeout(boxTimerRef.current)
-            boxTimerRef.current = setTimeout(() => setLiveBoxes([]), 4000)
+        const msg = JSON.parse(ev.data)
+        console.log('[WS /ws/monitor]', msg)
+        const det = msg.detection || msg.data
+
+        if ((msg.type === 'detection' || msg.type === 'new_detection') && det) {
+          const label = det.label || det.display_label || det.detected_class || 'Unknown'
+          const entry = {
+            id: det.id || det.event_id,
+            label,
+            display_label: label,
+            detected_class: det.detected_class,
+            confidence: det.confidence ?? 0,
+            camera_id: det.camera_id || activeCamera,
+            timestamp: det.timestamp || new Date().toISOString(),
+            distance_m: det.distance_m,
+            speed_ms: det.speed_ms,
+            screenshot_path: det.screenshot_path,
+            x: det.x ?? 0,
+            y: det.y ?? 0,
+            width: det.width ?? det.w ?? 0,
+            height: det.height ?? det.h ?? 0,
+          }
+          setMonitorEvents(prev => [entry, ...prev].slice(0, 60))
+          if (det.camera_id === activeCamera || !det.camera_id) {
+            setLiveBoxes(prev => [...prev, { ...entry, _id: Date.now() + Math.random(), _time: Date.now() }])
           }
         }
-      } catch (err) {
-        console.warn('[WS/detections] parse error', err)
-      }
+      } catch (e) { console.error('[WS] parse error', e) }
     }
-    ws.onerror = (err) => console.warn('[WS/detections] error', err)
-    wsRef.current = ws
-    return () => {
-      ws.close()
-      clearTimeout(boxTimerRef.current)
-    }
+    return () => wsRef.current?.close()
+  // eslint-disable-next-line
   }, [])
 
-  // ── Monitor WebSocket ────────────────────────────────────────────────────────
+  // Also connect to /ws/detections as fallback
   useEffect(() => {
-    try {
-      const wsMonitor = authWS('/ws/monitor')
-      wsMonitor.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data)
-          console.log('[WS/monitor] message:', msg)  // debug
-          if (msg.type === 'new_detection') {
-            setMonitorEvents(prev => [msg, ...prev].slice(0, 50))
-          } else if (msg.type === 'detection' && msg.data) {
-            setMonitorEvents(prev => [msg.data, ...prev].slice(0, 50))
+    const ws2 = authWS('/ws/detections')
+    ws2.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        const det = msg.detection || msg.data
+        if (msg.type === 'detection' && det) {
+          const label = det.label || det.display_label || det.detected_class || 'Unknown'
+          const entry = {
+            id: det.id, label, display_label: label, detected_class: det.detected_class,
+            confidence: det.confidence ?? 0, camera_id: det.camera_id,
+            timestamp: det.timestamp || new Date().toISOString(),
+            distance_m: det.distance_m, speed_ms: det.speed_ms,
+            x: det.x ?? 0, y: det.y ?? 0, width: det.width ?? det.w ?? 0, height: det.height ?? det.h ?? 0,
           }
-        } catch {}
-      }
-      wsMonitor.onerror = (err) => console.warn('[WS/monitor] error', err)
-      wsMonitorRef.current = wsMonitor
-      return () => wsMonitor.close()
-    } catch {}
+          setMonitorEvents(prev => {
+            if (prev.find(e => e.id && e.id === entry.id)) return prev
+            return [entry, ...prev].slice(0, 60)
+          })
+          setLiveBoxes(prev => [...prev, { ...entry, _id: Date.now() + Math.random(), _time: Date.now() }])
+        }
+      } catch {}
+    }
+    return () => ws2.close()
   }, [])
 
-  const selectedRecorder = recorders.find(r => (r.username || r.id) === selectedId) || null
-  const isOnline = selectedRecorder?.status === 'online'
-  const onlineRecorders = recorders.filter(r => r.status === 'online')
-  const visibleRecorders = recordersExpanded ? onlineRecorders : onlineRecorders.slice(0, 4)
+  // ── Expire old bounding boxes ────────────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => setLiveBoxes(prev => prev.filter(b => Date.now() - b._time < 4000)), 1000)
+    return () => clearInterval(id)
+  }, [])
 
-  const broadcastBroadcast = () => {
-    const msg = window.prompt("Enter broadcast message:")
-    if (msg) {
-      authFetch('/api/alerts', { method: 'POST', body: JSON.stringify({ type: 'broadcast', message: msg }) }).catch(() => {})
-    }
+  // ── 30-second stream heartbeat ───────────────────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => setStreamKey(k => k + 1), 30000)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── Night vision toggle ──────────────────────────────────────────────────
+  const toggleNV = async () => {
+    await authFetch('/api/feeds/processing', {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: activeCamera, night: !nv })
+    }).catch(() => {})
+    setNv(n => !n)
   }
 
-  const sendAlert = (type) => {
-    authFetch('/api/comms/alert', { method: 'POST', body: JSON.stringify({ type }) }).catch(() => {})
-  }
+  const refreshStream = () => setStreamKey(k => k + 1)
 
-  const labelColor = (label) => {
-    const l = (label || '').toLowerCase()
-    if (l === 'person') return '#388bfd'
-    if (l === 'vehicle') return '#d29922'
-    return '#f85149'
-  }
+  // ── Filtered events ──────────────────────────────────────────────────────
+  const filteredEvents = camFilter === 'ALL'
+    ? monitorEvents
+    : monitorEvents.filter(e => e.camera_id === camFilter)
 
-  const uniqueCameras = ['all', ...Array.from(new Set((monitorEvents || []).map(e => e.camera_id).filter(Boolean)))]
-  const filteredEvents = cameraFilter === 'all' ? monitorEvents : monitorEvents.filter(e => e.camera_id === cameraFilter)
+  const allCamIds = [...new Set(monitorEvents.map(e => e.camera_id).filter(Boolean))]
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  const token = getToken()
+  const streamUrl = `${API}/stream/${activeCamera}?token=${token}`
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 16, height: '100%', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
 
-      {/* ═══════════════ LEFT COLUMN ═══════════════ */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0, overflow: 'hidden' }}>
-
-        {/* STATS STRIP */}
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', flexShrink: 0 }}>
-          {loading ? (
-            Array.from({ length: 4 }).map((_, i) => <div key={i} className="skeleton" style={{ width: 90, height: 26, borderRadius: 13 }} />)
-          ) : (
-            <>
-              <div className="stat-chip" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 10px', borderRadius: '14px', fontSize: '11px', border: '1px solid var(--border)' }}>
-                <span className={`status-dot ${isOnline ? 'online' : 'offline'}`} />
-                <span style={{ fontWeight: 600, color: isOnline ? 'var(--accent-green)' : 'var(--text-muted)' }}>{isOnline ? 'LIVE' : 'OFFLINE'}</span>
-              </div>
-              <div className="stat-chip" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 10px', borderRadius: '14px', fontSize: '11px', border: '1px solid var(--border)' }}>
-                FPS: {selectedRecorder?.fps || '--'}
-              </div>
-              <div className="stat-chip" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 10px', borderRadius: '14px', fontSize: '11px', border: '1px solid var(--border)' }}>
-                WiFi: {selectedRecorder?.wifi_strength || '--'} dBm
-              </div>
-              <div className="stat-chip" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 10px', borderRadius: '14px', fontSize: '11px', border: '1px solid var(--border)' }}>
-                Battery: {selectedRecorder?.battery || '--'}%
-              </div>
-              {!sidePanelOpen && (
-                <div
-                  className="stat-chip"
-                  onClick={() => setSidePanelOpen(true)}
-                  style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(56,139,253,0.1)', color: 'var(--accent-blue)', padding: '4px 10px', borderRadius: '14px', fontSize: '11px', border: '1px solid rgba(56,139,253,0.3)', cursor: 'pointer', fontWeight: 600 }}
-                >
-                  <Bell size={12} /> Events
-                </div>
-              )}
-            </>
-          )}
+      {/* TOP BAR */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div className="live-dot" style={{ width: 8, height: 8 }} />
+          <span style={{ fontWeight: 700, fontSize: 15 }}>{activeCamera}</span>
+          <span className="badge badge-green">Live</span>
         </div>
+        <div style={{ flex: 1 }} />
+        
+        {/* Detection Mode Dropdown */}
+        <select 
+          value={detectionMode} 
+          onChange={changeDetectionMode}
+          style={{
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            color: 'var(--text-primary)', borderRadius: 6, fontSize: 12, padding: '4px 8px', cursor: 'pointer'
+          }}
+          title="Detection Mode"
+        >
+          <option value="auto">Auto</option>
+          <option value="full_periodic">Full Periodic</option>
+          <option value="roi_only">ROI Only</option>
+          <option value="full_scan">Full Scan</option>
+        </select>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div className="live-dot" style={{ width: 8, height: 8 }} />
+          <span style={{ fontWeight: 700, fontSize: 15 }}>{activeCamera}</span>
+          <span className="badge badge-green">Live</span>
+        </div>
+        <div style={{ flex: 1 }} />
+        <button className="btn btn-sm btn-secondary" onClick={toggleNV} title="Night Vision">
+          {nv ? <Moon size={14} /> : <Sun size={14} />}
+          &nbsp;{nv ? 'NV ON' : 'NV OFF'}
+        </button>
+        <button className="btn btn-sm btn-secondary" onClick={refreshStream} title="Refresh stream">
+          <RefreshCw size={14} />
+        </button>
+      </div>
 
-        {/* MAIN VIDEO PANEL */}
-        <div className="panel" style={{ flexShrink: 0, height: '60%', display: 'flex', flexDirection: 'column' }}>
-          <div className="panel-header" style={{ flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span className={`status-dot ${isOnline ? 'online' : 'error'}`} />
-              {viewMode === 'grid' ? 'Multi-Camera Grid' : (selectedRecorder?.display_name || selectedId || 'No recorder')}
-              {viewMode === 'single' && (
-                <span className={`badge ${isOnline ? 'badge-green' : 'badge-red'}`} style={{ marginLeft: '8px' }}>{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
-              )}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              {/* Grid / Single toggle */}
-              <button
-                className={`btn btn-sm ${viewMode === 'grid' ? 'btn-primary' : 'btn-ghost'}`}
-                style={{ padding: '4px 10px', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}
-                onClick={() => setViewMode(viewMode === 'single' ? 'grid' : 'single')}
-                title={viewMode === 'single' ? 'Switch to grid view' : 'Switch to single view'}
-              >
-                {viewMode === 'single' ? <Grid size={13} /> : <Monitor size={13} />}
-                <span>{viewMode === 'single' ? 'Grid' : 'Single'}</span>
-              </button>
-              <button className="btn btn-sm btn-ghost" style={{ padding: '4px' }}><Maximize2 size={14} /></button>
-            </div>
-          </div>
+      {/* MAIN CONTENT ROW: video + events */}
+      <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0 }}>
 
-          <div className="panel-body" style={{ flex: 1, padding: 0, position: 'relative', overflow: 'hidden' }}>
-            {viewMode === 'single' ? (
-              /* ─── SINGLE VIDEO ─── */
-              <div className="video-container" style={{ aspectRatio: '16/9', position: 'relative', background: 'black', overflow: 'hidden' }}>
-                {isOnline && !streamError ? (
-                  <img
-                    key={streamKey}
-                    src={`http://localhost:8000/stream/CAM-01?token=${getToken()}`}
-                    style={{
-                      width: '100%', height: '100%', objectFit: 'contain', display: 'block',
-                      transition: 'filter 0.4s ease'
-                    }}
-                    onError={() => {
-                      console.warn("Stream image error, retrying...");
-                      setStreamKey(prev => prev + 1);
-                    }}
-                  />
-                ) : (
-                  <div className="video-offline" style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
-                    <Camera size={32} style={{ opacity: 0.5, marginBottom: '8px' }} />
-                    <span>{streamError ? 'Stream error' : 'Stream unavailable'}</span>
-                    <button className="btn btn-secondary btn-sm" style={{ marginTop: '12px' }} onClick={() => setStreamError(false)}>Retry</button>
-                  </div>
-                )}
+        {/* VIDEO PANEL */}
+        <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden', minWidth: 0 }}>
+          <div style={{ position: 'relative', aspectRatio: '16/9', background: '#000', overflow: 'hidden', width: '100%' }}>
+            <img
+              key={streamKey}
+              src={streamUrl}
+              alt="Live Stream"
+              style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+              onError={() => setTimeout(() => setStreamKey(k => k + 1), 2000)}
+            />
 
-                {/* BOUNDING BOXES */}
-                {liveBoxes.map((box, i) => {
-                  const color = box.label === 'person' ? '#388bfd' : box.label === 'vehicle' ? '#d29922' : '#f85149'
-                  return (
-                    <div key={i} style={{
-                      position: 'absolute',
-                      left: box.x * 100 + '%',
-                      top: box.y * 100 + '%',
-                      width: box.w * 100 + '%',
-                      height: box.h * 100 + '%',
-                      border: `2px solid ${color}`,
-                      borderRadius: '3px', boxSizing: 'border-box',
-                      pointerEvents: 'none'
-                    }}>
-                      <span style={{
-                        position: 'absolute', top: '-18px', left: '-2px',
-                        background: color, color: 'white', fontSize: '9px', fontWeight: 700,
-                        padding: '1px 4px', borderRadius: '2px', whiteSpace: 'nowrap'
-                      }}>
-                        {box.label} {Math.round((box.confidence || 0) * 100)}%
-                      </span>
-                    </div>
-                  )
-                })}
-
-                {/* OVERLAY */}
-                <div className="video-overlay" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', padding: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div style={{ color: 'white', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 600 }}>{selectedRecorder?.location || 'Unknown Location'}</div>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* ─── GRID VIEW (2×2) ─── */
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(2, 1fr)',
-                gap: 2,
-                background: '#000',
-                aspectRatio: '16/9',
+            {/* Bounding box overlays */}
+            {liveBoxes.filter(b => b.width > 0).map(b => (
+              <div key={b._id} style={{
+                position: 'absolute',
+                left: `${b.x * 100}%`, top: `${b.y * 100}%`,
+                width: `${b.width * 100}%`, height: `${b.height * 100}%`,
+                border: `2px solid ${labelColor(b.label)}`,
+                borderRadius: 3, pointerEvents: 'none',
+                boxShadow: `0 0 6px ${labelColor(b.label)}88`
               }}>
-                {(cameras.length > 0 ? cameras.slice(0, 4) : [{ camera_id: 'CAM-01' }]).map((cam, idx) => {
-                  const camId = cam.camera_id || cam.id || `CAM-0${idx + 1}`
-                  return (
-                    <div key={camId} style={{ position: 'relative', background: '#0d1117', overflow: 'hidden' }}>
-                      <img
-                        key={streamKey}
-                        src={`${API}/stream/${camId}?token=${getToken()}`}
-                        style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
-                        onError={() => {
-                          console.warn("Stream image error, retrying...");
-                          setStreamKey(prev => prev + 1);
-                        }}
-                      />
-                      <div style={{ position: 'absolute', bottom: 4, left: 6, fontSize: 9, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,0.9)', background: 'rgba(0,0,0,0.5)', padding: '1px 5px', borderRadius: 3 }}>
-                        {camId}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {/* Recent inline detections bottom strip */}
-            {viewMode === 'single' && (
-              <div className="sub-panel" style={{ margin: '12px' }}>
-                <div style={{ display: 'flex', gap: '12px', overflowX: 'auto', paddingBottom: 4 }}>
-                  {detections.length === 0 ? (
-                    <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>No inline detections...</div>
-                  ) : (
-                    detections.map((d, i) => (
-                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: 'var(--bg-elevated)', borderRadius: 16, border: '1px solid var(--border)', flexShrink: 0 }}>
-                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: labelColor(d.label) }} />
-                        <span style={{ fontSize: '11px', fontWeight: 500, textTransform: 'capitalize' }}>{d.label}</span>
-                        <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{Math.round((d.confidence || 0) * 100)}%</span>
-                      </div>
-                    ))
-                  )}
+                <div style={{
+                  position: 'absolute', top: -20, left: -2,
+                  background: labelColor(b.label), opacity: 0.92,
+                  color: '#0d1117', fontSize: 9, fontWeight: 800,
+                  padding: '1px 6px', borderRadius: 3, whiteSpace: 'nowrap'
+                }}>
+                  {b.label} {Math.round((b.confidence || 0) * 100)}%
                 </div>
               </div>
+            ))}
+
+            {/* Overlay info bar */}
+            <div style={{
+              position: 'absolute', bottom: 0, left: 0, right: 0,
+              padding: '20px 12px 8px',
+              background: 'linear-gradient(transparent, rgba(0,0,0,0.78))',
+              display: 'flex', justifyContent: 'space-between',
+              color: '#fff', fontSize: 11, fontFamily: 'monospace'
+            }}>
+              <span>Monitor Dashboard — {activeCamera}</span>
+              <span style={{ color: '#39ff14' }}>● LIVE</span>
+            </div>
+
+            {nv && (
+              <div style={{
+                position: 'absolute', top: 10, left: 10,
+                background: 'rgba(57,255,20,0.18)', border: '1px solid #39ff14',
+                color: '#39ff14', fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12
+              }}>🌙 NV ON</div>
             )}
           </div>
         </div>
 
-        {/* BOTTOM ROW: QUICK ACTIONS (Optional) & RECORDERS LIST */}
-        <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0 }}>
-          {/* QUICK ACTIONS */}
-          <div className="panel" style={{ flex: '0 0 auto', display: 'flex', flexDirection: 'column' }}>
-            <div className="panel-header" style={{ fontSize: 12, fontWeight: 600, padding: '10px 14px', flexShrink: 0 }}>Quick Actions</div>
-            <div className="panel-body" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(100px, 1fr))', gap: '8px', padding: '12px 14px', overflowY: 'auto' }}>
-              <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', gap: 6, height: 70 }} onClick={() => sendAlert('sos')}>
-                <AlertOctagon size={18} color="var(--accent-red)" />
-                <span style={{ fontSize: 11 }}>Send SOS</span>
-              </button>
-              <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', gap: 6, height: 70 }} onClick={() => sendAlert('suspicious')}>
-                <Hand size={18} color="#d29922" />
-                <span style={{ fontSize: 11 }}>Suspicious</span>
-              </button>
-              <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', gap: 6, height: 70 }} onClick={() => authFetch('/api/recording/start_all', { method: 'POST' })}>
-                <Video size={18} color="var(--accent-green)" />
-                <span style={{ fontSize: 11 }}>Emergency Record</span>
-              </button>
-              <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', gap: 6, height: 70 }} onClick={broadcastBroadcast}>
-                <Radio size={18} color="var(--accent-blue)" />
-                <span style={{ fontSize: 11 }}>Broadcast</span>
-              </button>
-              <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', gap: 6, height: 70, gridColumn: 'span 2' }} onClick={() => window.location.href = `${API}/api/detections/export?token=${getToken()}`}>
-                <Download size={18} color="var(--text-muted)" />
-                <span style={{ fontSize: 11 }}>Export log</span>
-              </button>
+        {/* EVENTS PANEL */}
+        <div className="panel" style={{ width: 300, display: 'flex', flexDirection: 'column', minHeight: 0, flexShrink: 0 }}>
+          <div className="panel-header" style={{ flexShrink: 0 }}>
+            <span style={{ fontWeight: 600 }}>Live Events</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span className="badge badge-blue">{filteredEvents.length}</span>
+              {/* Camera filter */}
+              <select
+                value={camFilter}
+                onChange={e => setCamFilter(e.target.value)}
+                style={{
+                  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                  color: 'var(--text-primary)', borderRadius: 6, fontSize: 11, padding: '2px 6px', cursor: 'pointer'
+                }}
+              >
+                <option value="ALL">All Cams</option>
+                {allCamIds.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
             </div>
           </div>
-
-          {/* RECORDERS LIST (online only, collapsible) */}
-          {onlineRecorders.length > 0 && (
-            <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-              <div className="panel-header" style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Menu size={13} />
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>Online Recorders</span>
-                  <span className="badge badge-green">{onlineRecorders.length}</span>
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            {filteredEvents.length === 0 ? (
+              <div className="empty-state" style={{ padding: 20 }}>No detections yet</div>
+            ) : filteredEvents.map((ev, i) => (
+              <div
+                key={ev.id || i}
+                onClick={() => setSelectedEvent(ev)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px',
+                  borderBottom: '1px solid var(--border)', cursor: 'pointer',
+                  transition: 'background 0.15s'
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-elevated)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: labelColor(ev.label), flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {ev.display_label || ev.label}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', gap: 6 }}>
+                    <span>{Math.round((ev.confidence || 0) * 100)}%</span>
+                    {ev.camera_id && <span>• {ev.camera_id}</span>}
+                    {ev.distance_m != null && <span>• ~{ev.distance_m}m</span>}
+                  </div>
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>
+                  {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : 'Now'}
                 </div>
               </div>
-              <div className="panel-body" style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
-                {loading ? (
-                  Array.from({ length: 2 }).map((_, i) => <div key={i} className="skeleton" style={{ height: 52, borderRadius: 8, flexShrink: 0 }} />)
-                ) : (
-                  <>
-                    {visibleRecorders.map(rec => {
-                      const id = rec.username || rec.id
-                      return (
-                        <div
-                          key={id}
-                          onClick={() => { setSelectedId(id); setStreamError(false) }}
-                          style={{
-                            padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', flexShrink: 0,
-                            border: `1px solid ${selectedId === id ? 'var(--accent-blue)' : 'var(--border)'}`,
-                            background: selectedId === id ? 'rgba(56,139,253,0.06)' : 'var(--bg-elevated)',
-                            display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-                          }}
-                        >
-                          <div>
-                            <div style={{ fontSize: '12px', fontWeight: 600, color: selectedId === id ? 'var(--accent-blue)' : 'var(--text-primary)' }}>
-                              {rec.display_name || id}
-                            </div>
-                            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 2 }}>{rec.location || 'Unknown'}</div>
-                          </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, fontSize: '10px', color: 'var(--text-secondary)' }}>
-                            <span>🔋 {rec.battery || '--'}%</span>
-                            <span>📶 {rec.wifi_strength || '--'}</span>
-                          </div>
-                        </div>
-                      )
-                    })}
-                    {onlineRecorders.length > 4 && (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        style={{ alignSelf: 'center', fontSize: 11, marginTop: 2, flexShrink: 0 }}
-                        onClick={() => setRecordersExpanded(e => !e)}
-                      >
-                        {recordersExpanded ? '▲ Show Less' : `▼ View More (${onlineRecorders.length - 4} more)`}
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
-          )}
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* ═══════════════ RIGHT COLUMN ═══════════════ */}
-      {sidePanelOpen && (
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-          <div className="panel-header" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 8, padding: '12px 14px', flexShrink: 0 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>Live Events</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span className="badge badge-blue">{filteredEvents.length}</span>
-                <button className="btn btn-ghost btn-sm" style={{ padding: 4 }} onClick={() => setSidePanelOpen(false)}>
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-            {/* Camera filter */}
-            <select
-              className="input-field"
-              value={cameraFilter}
-              onChange={e => setCameraFilter(e.target.value)}
-              style={{ fontSize: 11, height: 28, padding: '0 8px', width: '100%' }}
-            >
-              {uniqueCameras.map(cam => (
-                <option key={cam} value={cam}>{cam === 'all' ? 'All Cameras' : cam}</option>
-              ))}
-            </select>
-          </div>
+      {/* BOTTOM ROW: Recorders + Other Cameras */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
 
-          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
-            {filteredEvents.length === 0 ? (
-              <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 11 }}>
-                No events yet...
+        {/* Recorders */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
+            Field Recorders
+          </div>
+          <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 4 }}>
+            {recorders.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>No recorders online</div>
+            ) : recorders.map(rec => (
+              <div
+                key={rec.id || rec.username}
+                onClick={() => setActiveCamera('CAM-01')}
+                style={{
+                  width: 150, flexShrink: 0, cursor: 'pointer',
+                  background: 'var(--bg-surface)', border: '1px solid var(--border)',
+                  borderRadius: 10, padding: '10px 12px',
+                  transition: 'border-color 0.2s, box-shadow 0.2s',
+                  boxShadow: activeCamera === 'CAM-01' ? '0 0 0 2px #388bfd44' : 'none',
+                  borderColor: activeCamera === 'CAM-01' ? '#388bfd' : 'var(--border)'
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = '#388bfd66' }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = activeCamera === 'CAM-01' ? '#388bfd' : 'var(--border)' }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: rec.is_online ? '#39ff14' : '#6e7681' }} />
+                  <span style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {rec.display_name || rec.username}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>{rec.is_online ? 'Online' : 'Offline'}</span>
+                  {rec.battery != null && <span>🔋 {rec.battery}%</span>}
+                </div>
               </div>
-            ) : (
-              filteredEvents.map((ev, i) => {
-                const color = labelColor(ev.label || ev.detected_class)
-                return (
-                  <div
-                    key={ev.id || i}
-                    onClick={() => setSelectedEvent(ev)}
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 14px',
-                      borderBottom: '1px solid var(--border)', cursor: 'pointer',
-                      transition: 'background 0.1s ease'
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-elevated)'}
-                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                  >
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: color, marginTop: 4, flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'capitalize' }}>
-                        {ev.display_label || ev.label || ev.detected_class || 'Unknown'}
-                      </div>
-                      <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', gap: 8, marginTop: 2 }}>
-                        <span>{Math.round((ev.confidence || 0) * 100)}%</span>
-                        {ev.camera_id && <span>{ev.camera_id}</span>}
-                        {ev.distance_m != null && <span style={{ color: '#39ff14' }}>~{ev.distance_m}m</span>}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 9, color: 'var(--text-muted)', flexShrink: 0 }}>
-                      {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'now'}
-                    </div>
-                  </div>
-                )
-              })
-            )}
+            ))}
           </div>
         </div>
-      )}
+
+        {/* Other Cameras */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
+            Cameras
+          </div>
+          <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 4 }}>
+            {/* Always show CAM-01 */}
+            {['CAM-01', ...cameras.map(c => c.camera_id || c.id).filter(id => id && id !== 'CAM-01')].map(camId => (
+              <div
+                key={camId}
+                onClick={() => { setActiveCamera(camId); setStreamKey(k => k + 1) }}
+                style={{
+                  width: 140, flexShrink: 0, cursor: 'pointer',
+                  border: `1px solid ${activeCamera === camId ? '#388bfd' : 'var(--border)'}`,
+                  borderRadius: 8, overflow: 'hidden',
+                  boxShadow: activeCamera === camId ? '0 0 0 2px #388bfd44' : 'none',
+                  transition: 'box-shadow 0.2s, border-color 0.2s'
+                }}
+              >
+                {/* Thumbnail */}
+                <div style={{ width: '100%', aspectRatio: '16/9', background: '#0d1117', overflow: 'hidden', position: 'relative' }}>
+                  <img
+                    src={`${API}/stream/${camId}?token=${token}&thumb=1`}
+                    alt={camId}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85 }}
+                    onError={e => { e.target.style.display = 'none' }}
+                  />
+                  {activeCamera === camId && (
+                    <div style={{
+                      position: 'absolute', top: 4, right: 4,
+                      background: '#388bfd', color: '#fff', fontSize: 9, fontWeight: 700,
+                      padding: '1px 5px', borderRadius: 4
+                    }}>ACTIVE</div>
+                  )}
+                </div>
+                <div style={{ padding: '4px 8px', fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', background: 'var(--bg-surface)' }}>
+                  {camId}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
 
       {/* EVENT MODAL */}
       {selectedEvent && <EventModal event={selectedEvent} onClose={() => setSelectedEvent(null)} />}

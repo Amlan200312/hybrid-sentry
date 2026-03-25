@@ -457,7 +457,12 @@ class DetectionEngine:
 
             # Get class and confidence from detection data
             det_class = track.det_class if hasattr(track, "det_class") else "person_civilian"
-            det_conf = track.det_conf if hasattr(track, "det_conf") else 0.50
+            det_conf = track.det_conf if (hasattr(track, "det_conf") and track.det_conf is not None) else 0.50
+            # Ensure numeric type (DeepSORT may return None on some backends)
+            try:
+                det_conf = float(det_conf)
+            except (TypeError, ValueError):
+                det_conf = 0.50
 
             # Unknown if confidence < 0.60
             if det_conf < 0.60:
@@ -495,7 +500,7 @@ class DetectionEngine:
             # Check object in hand (overlap with held items)
             holding_object = None
             for other_track in tracks:
-                if other_track.track_id == track_id:
+                if other_track.track_id is None or other_track.track_id == track_id:
                     continue
                 if not other_track.is_confirmed():
                     continue

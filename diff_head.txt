@@ -1,0 +1,1500 @@
+﻿diff --git a/backend/image_processing.py b/backend/image_processing.py
+index dba546e..3f37e46 100644
+--- a/backend/image_processing.py
++++ b/backend/image_processing.py
+@@ -16,30 +16,27 @@ from typing import Optional, Tuple, List
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ def night_vision(frame: np.ndarray) -> np.ndarray:
+     """
+-    Software-only night vision: CLAHE on luminance + green tint.
+-    Grayscale ΓåÆ CLAHE(3.0, 8x8) ΓåÆ denoise ΓåÆ sharpen ΓåÆ green channel tint.
+-    NO hardware light required.
++    Lightweight night vision: boost green channel x1.3, reduce red/blue x0.8.
++    Processes every other frame to maintain FPS on RPi.
+     """
+-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+-
+-    # CLAHE adaptive histogram equalization
+-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+-    enhanced = clahe.apply(gray)
++    if not hasattr(night_vision, '_frame_counter'):
++        night_vision._frame_counter = 0
++    night_vision._frame_counter += 1
+ 
+-    # Denoise
+-    denoised = cv2.fastNlMeansDenoising(enhanced, h=10, templateWindowSize=7, searchWindowSize=21)
++    # Only process every 2nd frame ΓÇö return cached result on skipped frames
++    if night_vision._frame_counter % 2 == 0:
++        if hasattr(night_vision, '_last_result') and night_vision._last_result is not None:
++            return night_vision._last_result
+ 
+-    # Sharpen
+-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+-    sharpened = cv2.filter2D(denoised, -1, kernel)
++    out = frame.astype(np.float32)
++    out[:, :, 0] = np.clip(out[:, :, 0] * 0.8, 0, 255)  # Blue
++    out[:, :, 1] = np.clip(out[:, :, 1] * 1.3, 0, 255)  # Green (boost)
++    out[:, :, 2] = np.clip(out[:, :, 2] * 0.8, 0, 255)  # Red
+ 
+-    # Apply green channel tint: use green channel most, reduce red/blue
+-    output = np.zeros((frame.shape[0], frame.shape[1], 3), dtype=np.uint8)
+-    output[:, :, 0] = (sharpened * 0.2).astype(np.uint8)   # Blue: dim
+-    output[:, :, 1] = sharpened                              # Green: full
+-    output[:, :, 2] = (sharpened * 0.15).astype(np.uint8)  # Red: very dim
++    result = out.astype(np.uint8)
++    night_vision._last_result = result
++    return result
+ 
+-    return output
+ 
+ 
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+@@ -366,7 +363,8 @@ class ImagePipeline:
+         self._frame_count = 0
+ 
+         # Toggle flags
+-        self.night_mode = False
++        self._night_mode = False
++        self._night_manual = False  # True = user set manually, skip auto
+         self.flow_mode = False
+         self.edges_mode = False
+         self.bgsub_mode = False
+@@ -380,6 +378,15 @@ class ImagePipeline:
+         self.auto_night = True
+         self._auto_night_check_interval = 10   # every N frames
+ 
++    @property
++    def night_mode(self) -> bool:
++        return self._night_mode
++
++    @night_mode.setter
++    def night_mode(self, value: bool):
++        self._night_mode = value
++        self._night_manual = True  # Mark as manually controlled
++
+     @property
+     def motion_regions(self) -> List[Tuple[int, int, int, int]]:
+         return self._last_motion_rects
+@@ -401,12 +408,12 @@ class ImagePipeline:
+ 
+         orig = frame.copy()
+ 
+-        # Auto lighting check every N frames
+-        if self.auto_night and self._frame_count % self._auto_night_check_interval == 0:
++        # Auto lighting check every N frames (skipped if user manually set night mode)
++        if self.auto_night and not self._night_manual and self._frame_count % self._auto_night_check_interval == 0:
+             if should_auto_night_vision(frame):
+-                self.night_mode = True
++                self._night_mode = True
+             else:
+-                self.night_mode = False
++                self._night_mode = False
+ 
+         out = frame.copy()
+ 
+diff --git a/backend/main.py b/backend/main.py
+index 493c29a..1fbf10f 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -88,6 +88,13 @@ COMMS_DIR   = RECORDINGS_DIR / "comms"
+ # Active monitor WebSocket connections (for broadcast)
+ _monitor_ws_list: List[WebSocket] = []
+ 
++# Active detection WebSocket connections (recorders + monitors viewing detections)
++_detection_ws_list: List[WebSocket] = []
++
++# In-memory system log buffer
++from collections import deque as _deque
++_system_logs: _deque = _deque(maxlen=200)
++
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ # STARTUP / SHUTDOWN
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+@@ -117,10 +124,15 @@ async def startup():
+ 
+     # Start multi-feed manager
+     def _detection_callback(camera_id, det, annotated_frame):
+-        asyncio.get_event_loop().run_until_complete(
+-            _handle_detection_event(camera_id, det, annotated_frame)
+-        )
+-    feed_manager.detection_callback = None  # Will be attached in ws endpoint
++        try:
++            loop = asyncio.get_event_loop()
++            if loop.is_running():
++                asyncio.ensure_future(_handle_detection_event(camera_id, det, annotated_frame))
++            else:
++                loop.run_until_complete(_handle_detection_event(camera_id, det, annotated_frame))
++        except Exception as e:
++            print(f"[MAIN] Detection callback error: {e}")
++    feed_manager.detection_callback = _detection_callback
+     feed_manager.start()
+ 
+     # Register main webcam (CAM-01) ΓÇö index 0
+@@ -239,21 +251,59 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
+                 db.add(hm)
+             db.commit()
+ 
+-        # Broadcast to monitors via WebSocket
++        # Compute bbox as percentage for frontend overlay
++        bbox_pct = None
++        if det.get("bbox") and annotated_frame is not None:
++            fh, fw = annotated_frame.shape[:2]
++            bx, by, bw, bh = det["bbox"]
++            bbox_pct = {
++                "x": round(bx / fw * 100, 2),
++                "y": round(by / fh * 100, 2),
++                "width": round(bw / fw * 100, 2),
++                "height": round(bh / fh * 100, 2),
++            }
++
++        detection_payload = {
++            "type": "detection",
++            "detection": {
++                "id": ev.id,
++                "label": det.get("display_label", det.get("detected_class", "unknown")),
++                "confidence": det.get("confidence", 0.0),
++                "camera_id": camera_id,
++                "timestamp": datetime.utcnow().isoformat(),
++                **(bbox_pct or {}),
++            },
++        }
++        monitor_payload = {
++            "type": "new_detection",
++            "event_id": ev.id,
++            "route": det.get("route"),
++            "camera_id": camera_id,
++            "detected_class": det.get("detected_class"),
++            "display_label": det.get("display_label"),
++            "confidence": det.get("confidence"),
++            "timestamp": datetime.utcnow().isoformat(),
++        }
++
++        dead = []
++        for ws in _detection_ws_list:
++            try:
++                await ws.send_json(detection_payload)
++            except Exception:
++                dead.append(ws)
++        for ws in dead:
++            if ws in _detection_ws_list:
++                _detection_ws_list.remove(ws)
++
++        dead = []
+         for ws in _monitor_ws_list:
+             try:
+-                await ws.send_json({
+-                    "type": "new_detection",
+-                    "event_id": ev.id,
+-                    "route": det.get("route"),
+-                    "camera_id": camera_id,
+-                    "detected_class": det.get("detected_class"),
+-                    "display_label": det.get("display_label"),
+-                    "confidence": det.get("confidence"),
+-                    "timestamp": datetime.utcnow().isoformat(),
+-                })
++                await ws.send_json(monitor_payload)
+             except Exception:
+-                pass
++                dead.append(ws)
++        for ws in dead:
++            if ws in _monitor_ws_list:
++                _monitor_ws_list.remove(ws)
+ 
+     except Exception as e:
+         print(f"[MAIN] Detection save error: {e}")
+@@ -1568,6 +1618,30 @@ async def set_processing_toggles(
+     return {"success": True}
+ 
+ 
++@app.get("/api/feeds/processing/{camera_id}")
++async def get_processing_toggles(
++    camera_id: str,
++    current_user: dict = Depends(require_any),
++):
++    """Return current image processing state for a camera."""
++    state = feed_manager.get_state(camera_id)
++    if not state:
++        raise HTTPException(404, "Camera not found")
++    p = state.pipeline
++    return {
++        "camera_id": camera_id,
++        "night_mode": p.night_mode,
++        "flow_mode": p.flow_mode,
++        "edges_mode": p.edges_mode,
++        "bgsub_mode": p.bgsub_mode,
++        "sharpen_mode": p.sharpen_mode,
++        "enhance_mode": p.enhance_mode,
++        "zoom_mode": p.zoom_mode,
++        "compare_mode": p.compare_mode,
++        "freeze_mode": p.freeze_mode,
++    }
++
++
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ # WEBSOCKET ΓÇö MONITOR DASHBOARD
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+@@ -1599,6 +1673,34 @@ async def ws_monitor(websocket: WebSocket, token: str = ""):
+         gps_manager.unregister_monitor(websocket)
+ 
+ 
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++# WEBSOCKET ΓÇö DETECTIONS (recorder + monitor live feed)
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++@app.websocket("/ws/detections")
++async def ws_detections(websocket: WebSocket, token: str = ""):
++    """Stream live detection events (bbox as % coords) to any authenticated user."""
++    payload = ws_authenticate(token)
++    if not payload:
++        await websocket.close(code=4001)
++        return
++    await websocket.accept()
++    _detection_ws_list.append(websocket)
++    try:
++        while True:
++            data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
++            try:
++                msg = json.loads(data)
++                if msg.get("type") == "ping":
++                    await websocket.send_json({"type": "pong", "ts": time.time()})
++            except Exception:
++                pass
++    except (WebSocketDisconnect, asyncio.TimeoutError):
++        pass
++    finally:
++        if websocket in _detection_ws_list:
++            _detection_ws_list.remove(websocket)
++
++
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ # WEBSOCKET ΓÇö VOICE COMMS
+ # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+@@ -1624,6 +1726,315 @@ async def ws_gps_monitor(websocket: WebSocket, token: str = ""):
+     await handle_monitor_gps_ws(websocket, token)
+ 
+ 
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++# SNAPSHOT (for recorder quick-action)
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++class SnapshotRequest(BaseModel):
++    camera_id: str = "CAM-01"
++
++
++@app.post("/api/feeds/snapshot")
++async def take_feed_snapshot(
++    req: SnapshotRequest,
++    current_user: dict = Depends(require_any),
++):
++    """Take a screenshot from a camera's latest frame."""
++    cam_id = req.camera_id
++    state = feed_manager.get_state(cam_id)
++    if not state:
++        raise HTTPException(404, "Camera not found")
++    buf = state.frame_buffer.snapshot()
++    if not buf:
++        raise HTTPException(503, "No frames available")
++    frame, _ = buf[-1]
++    path = recording_manager.take_screenshot(frame, cam_id)
++    _system_logs.append({
++        "level": "info",
++        "message": f"Snapshot taken by {current_user['username']} from {cam_id}: {path}",
++        "timestamp": datetime.utcnow().isoformat(),
++    })
++    return {"success": True, "path": path}
++
++
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++# FIELD COMMS ΓÇö POST NEW MESSAGE
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++class CommsMessageCreate(BaseModel):
++    content: str
++    sender_id: str = ""
++    sender_name: str = ""
++    type: str = "text"      # text | alert
++    broadcast: bool = False
++
++
++@app.post("/api/comms/messages")
++async def post_comms_message(
++    req: CommsMessageCreate,
++    db: Session = Depends(get_db),
++    current_user: dict = Depends(require_any),
++):
++    """Save a text message from a recorder / field user and broadcast to monitors."""
++    username = current_user["username"]
++    msg = FieldMessage(
++        username=username,
++        callsign=current_user.get("callsign") or username,
++        text=req.content,
++        priority="urgent" if req.type == "alert" else "normal",
++        trigger_type="text",
++    )
++    db.add(msg)
++    db.commit()
++    db.refresh(msg)
++
++    broadcast_payload = {
++        "type": "message",
++        "id": msg.id,
++        "content": msg.text,
++        "text": msg.text,
++        "sender_id": username,
++        "sender_name": current_user.get("display_name") or username,
++        "callsign": msg.callsign,
++        "username": username,
++        "timestamp": msg.timestamp.isoformat() if msg.timestamp else datetime.utcnow().isoformat(),
++        "priority": msg.priority,
++    }
++    dead = []
++    for ws in _monitor_ws_list:
++        try:
++            await ws.send_json(broadcast_payload)
++        except Exception:
++            dead.append(ws)
++    for ws in dead:
++        if ws in _monitor_ws_list:
++            _monitor_ws_list.remove(ws)
++
++    _system_logs.append({
++        "level": "info",
++        "message": f"Comms message from {username}: {req.content[:60]}",
++        "timestamp": datetime.utcnow().isoformat(),
++    })
++    return {"success": True, "id": msg.id}
++
++
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++# COMMS ΓÇö SYSTEM ALERT BROADCAST
++# ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
++class AlertRequest(BaseModel):
++    type: str  # 'emergency', 'broadcast', etc.
++
++@app.post("/api/comms/alert")
++async def post_comms_alert(
++    req: AlertRequest,
++    db: Session = Depends(get_db),
++    current_user: dict = Depends(require_any),
++):
++    """Broadcast a system alert (emergency, broadcast, etc.) to all monitor WebSockets and save to DB."""
++    username = current_user["username"]
++    alert_text = f"[{req.type.upper()}] Alert triggered by {username}"
++
++    msg = FieldMessage(
++        sender_username=username,
++        text=alert_text,
++        priority="emergency",
++        callsign=current_user.get("callsign", ""),
++    )
++    db.add(msg)
++    db.commit()
++    db.refresh(msg)
++
++    alert_payload = {
++        "type": "system_alert",
++        "alert_type": req.type,
++        "message": alert_text,
++        "sender": username,
++        "id": msg.id,
++        "timestamp": datetime.utcnow().isoformat(),
++    }
++
++    dead = []
++    for ws in _monitor_ws_list:
++        try:
++            await ws.send_json(alert_payload)
++        except Exception:
++            dead.append(ws)
++    for ws in dead:
++   뇿婼筕蟏ᔜ倾蘿錱桄鑣ﴅ糥⭼ཛꎺ뀑Ɩ᳡ꃥ艰꺅网坂㤁榉㜮ﳑ㓖옾浢컱䛵ਞ鸆衕ㄉ牫뤋뗔⥬镩䇸퍋౩퀧䲹鐛ɫ⽮⮃뵎充欄旽즫討狯蒟䒆䗠ଲᩝ㛁峥傞꥙脢篽諭쓤붦퉞螒侮ꒆូ孆垾龕⪱ﴰⓩ⛻↕閒礧ᦥ멫啤⢬﮿褘᫃ు䟎喩⊟ࡩϧњ챻௅쒱튚쳣⩣䍷篤꿸풙祜䂷Ⴚ㲁↙銫ર뒗☛㆜獽嵈䨛થ슎僯煾馆征걋㼶쮁颢䯊㏣⸃ؖ᮶ꎟ⯱냒罒즜߄䃚阦⡪选匋꬝瑇馷﨎䕄৴癨즗㝻罷棨揈산켻壥Рᛳᗜ崛섻訒쇡漵粘춤܍좁៝虠剄嚌躑は〮湉⁓愯굁謌⧁彣ྭ❐骠猲ጕ쮁ꚑ헭䉜᱑氜쥏㸼癇芇曟蠀妐갘쀋೔⌮ᑒ赾铰꿱ဨ莛ꇦ崊钬Ǧ窃呫퍝䅇䭵높àꃿ娒᥉슋尵딺杪酀ᾶ鶮묾K䢰譁䄪뫼‶┘≚襯ﶦ곻媓㳲䣤駳督͔湞＋쑣Ì닞掗権揞㾌딏淢ぼ起뗉瀊㰠贳㸂풛༛큆ꇈꪥ䱣詖姡챡艻걎瞂૝煤定ᵅ⩱곗䝽䢻ꋹ⾫č퓐業睊謁炁躮饂酙䠇흠ⱀ성禖橽࡭셊ࢼㆉ௒굄쇏孎㹴ৠ鹗䣷ග揼ѧ⽙輙쭸씣倶ȳ왉訬ᐥ㼀퉫쨈軺￘靁鍋緧蒑䫆碅搟폷퇠廪䕎⪟햭⃵뷞夝編䬅ꞥ∫﻿冁朼屉ሤꃥ辕芒똤♜ግ謰ꛗ氂薒﹠兄ڱ摵绋ꓣȅᨖ렯禂ዖँ획躛ᴱ셺靴๬㝾笨砡⌒攞痕证鍼陱㖏唢墧ࡦ트溓욆깅䂘钚輝뜌외鲘뀉ᗃ圂⷗뿉挊枱❹筧သ⑺ﳥ㿫뢚墴꛰４作隔潺䆗栣霹圶ԅ鵆헙参嬧奅頃ࠇ빷歂촷ሺ唠㍠﬋ุ林삭㨥駏Ɬ෥쪃纤ᷳ執፹ᚾ垣푈숇准吴ᎨꔢꜸゟσ땲䅳权辫ቭ꘱疉캮䝚阃㠏뼊⇯䚢螚沯泜ᓶ▣⋣쇄쩾铜揫᏶⇘鏬鶴乊緁㉈鼧⨈퉍ᣇ㈫媨㗍鰨뮪嘰ꍐᑒyⵦ撽掋ầ黜滲π㯒箯弰౞⩀䶰끺䦺။⠡䩺鄬俘뭕镽攔탓脋嗇⼅햓㰈佼鰩н֒ܟࡇ坣Ⅼᵈे໰曀簻屖켲䎸ꒁ㡕랶銉䈠몸窂웍镮⇷ᮧ૯᝹蠱䘅踛恬餍㡁葐覔䇈䶳ᮮ峈㾋位饷䝔睖癏檝⪨▀껻报䲨▜倩態䵡潃夶ᡗヶ땨䝉ᑽ׋썥綄僆๋載䞐ⶖ器鏾◄硕钓뀮稱⑸柏깳鳥፫痕嬾潡夵螁Ꝍ劳劯緉턨ಆﺁ졚퀵踦砰범豅ⴍ錔㲚奼⃟ж஭⬣䦲໮䰆䶻읕ك涌ΰ⹬ㄐᶊ圛辙ᗺⷼ馢噻癢ꊰꚫ脗☡갱ᧂ哸矀㦞頾殭㪵笅뤛뀕詁മ堉ポ୮瓨ᑡ鞂鶓遂⦚樶䡾ﺒ糶ꔄಞ抦旯㪇蜌匹ﵶﴄ䊚匐ꨴ긞户ຍ顊膺⥟犏뱧̪켹棻祰櫂䌔久止嘭⨁뿜읮쩶欆뫗܄锎혼쩙臍㇦ㄭꖔ敃僪뗸贘ﰁ릤툥✷䶗睚ᙐ䮎㲪衽貢䨔밈굗荳㾤鳃쯁娻ᩴ劐괁菽㎠諊ȿ泬㘱鴶侎ᄷ矗乷䰣޼㯊㲇颰編䇛ＢԹ蹴ﭯ㵙預姞岂排᭣㼳ꄌ身㫋쬠썑穖嫇ꨗ﹐恘⵬胳ꡬ儘蚙顶뾋뛒ღꬤ惀尗﩯뽶枴蜴떵ꐍ业갍ﵭ螢蝭饟쫶㶜乗ἷಷ豶ťȫ驉䧪뤴囓ŧ鞠㪅곞R獀⟀ᓛ퇪㝙镰꭬翤Ј⠚ﶹ䡫׽ଛ豍휦᳇뾗췚ऀ籤Ṡ஦㓕쯈㥸⭏䗠塟낮圚ᙥ凝㻗燔㤥繮ʩ黸辍䬮 築硒鶻⓶뱝䢵풪쵃嫯좵뺴涙장ﾾ銳匔嗙೨絸蒩堑暢⸻ᳺ뵌੷嘙㰇벻ၯ뇍뜉⁪좜ꢧꔑ縏嘔硂ﶏԧ댛먑ꏩ࢏핶䗴߽★奵⚰럭臱펽੭팣せ剰⛀⥫홽艥⫼猄Ұほ섾∰ט뀒⇟꒞뜭ᙹ⩰쌧햑æ쮢鑦뢖躾溠寮̚ᡥ㮎頬蠿㧭膋ɫ鵷侥䷃馉흩古ၵ㇣킯⚇䏪텒䟫ﻹ풇喽劥蒿騜⫎㡉묍펚鯢坎덠鞏䊘ꅪ凎컃㻨ሟ鏦ǜỴଲꩮ镞璿⋨匩䵵ፘ儭谈똣粰ⅶ⿭鯏쮤땱䯴갦곘ⶅ嘼藽Ք苴劇⁴͂酄ꨗ묖撧⛓⹮綧뎖鄽霹⠛瘇膉ⰱ朥Ѱ흪齮☛㱯葐࡟㏩䗍䊒䀪⏈ꇟ͚쳓炨쿿᧓佞궢㓻괐쐑⛬≺먨땿량ᶾ观記﨤Ⱛ瞣쀆䉲썔⥕詷若箪䪓胓礌촽੩厀㏆鳴顓㺪裍뾯쥞䤐숌턷Ԍ⣜㧨鉷띲쏭닢ኂ텣㯯ႅȼ뮖ᖟ켣䘷㱢쭽ꍕځ런ᨲⒽ좣굛뎶㯀贫悿䶽륦떁ﰁ銈㰗૘廒쌀㡚궗ꃂⴋ⡻⼦럨色哙쑅頰旴㢭珃đ䔔扅⿲럴鷗坻(ˤ拪쩆⦺쟺월曥涏䁦蜹﹮ꩥ孻Ⲿ市铽搫䘓ᔣ봿蓤硴䝿뒝觞㎷혰꿤옆㧧塹詘ﳙ魇먨⭕꜍劳⼷ͦ训햖懕ꇘⰓ홓羃委튝領낓弪㼢꼵஄뤄킋쬴唡㯘瞖辱싚盱ﰻേ菒軙ൗ☁瓥옌僇媨䝃뼽ퟸᅾ᱀宫ꉴСΊ윟咬鱚㗴闆ꎥ㺉獇滌駎틥㠝ℴ㚊舩⽭貺沗뽬줡⏺킮脙脲妟ﭟ獷层䈺䙄싇ﯦ岔뽦ꎎ套릂኎⁐䝧紩㎤젭⵿ﴣ잕숬뱃䐷苚洄겲֜⦶烊콥瑃샒ᒴ鿮蘏栲壾쾅㾇媳෼驜線酐鰰鎼ⶫ亅렀鳾㒲苦䈌머ߧ쨠愅쾥蚹ᑷ詊㢿롯ᰞ틩꓅⾺ꞏ웒൥ꫲ쭭ⓣ響펬朲ꯦ᭡蔤㟏黨摿ᮬ㈺賩昍䐎뮱㤛㋘ꂈ㗐❿홝桴￟氮䓝蚺뛟늡繪ⴖ뜗ⲧ䤇쉛㢗៰ሽᫍ펵䌲幄뱘뭴췮墴⒤⇣襘덅뉽뛤哚销느䌰ᬰ紥愌䜖舔楯돣౶鰎贇ᑯ픾㊾ᷚꃰ쏮猫⧋謢ಳ鑋輺茂৒惊ⷺꊧޤ皮鄴귝蟟皔曙숏椋투昌᫭뗮㙺᯳們ᰜ빛ꨳ㷂衽叺窐׹甃໿⃩䌮䓤䰧㱐噝䝤㧷Ꙛ⓼ⷘ媱㾫Ԡ㮪ᐹ憋抖ㄙ吲鴌챪瓺Ế蜿櫓˗빵﫩刂內▄ﳝ键룶ꗟ閉锾ప⠍䆞쩆龗놦뾅휬脓සꟵ꒗헍싏ꇘച셳갃↾⵽明齍퇝砯壅땧郌썥䇽霛墅㝂ђ끙陼凲㐨塼휮켽侞횢ਘ䴲覢횂跡엛⿘틉辭਱鑋ﬨ䛴骿毇㿈豭귝䃱ᵰ≍ꦓ㍌ॡⷰࣘ䛥襄鬮牕믍ᗓ勼줵퉇譴ք祋Ფ㔔⺌뢡툘ྯ썓௛횧޲蚧⺼⢏ೂ尗痳㕲俏➾맷웴黻饬ﭚ素嫡Ӣ⎪㮣袳퀠‌뽨棅컺ᬛ⹗鞣Ⰸ嫶研䡉ߤᛑ䎴䳱ᘀ퉼鳷轙ꨞꃠ닯಴⯚ᚈ킝ࢯ툏왏䡱瞸爠踒ĵ봙봧숮樕乖竼Ѹ婥鶍唀ﷲ塞棠嬡繜퇈᭘✤嚼㟗橹왈≆ꎗ榤셭廗臗᧻蠂䷩獬䌐⏩췡畛ꮱ镋⴮皲㭵⫨뙣ꡉ9峞ﾠ੥紻뷯筩呷颦씻蒍茅ﭦ雪쉬폼⊯⟀퉴㚞蘗ᆘ倪켮ґᯊᎥ鰆깶즙炅䙴魽뼒䷝껇량탯Ო蜫⏀㈋淇顓啫肆Ġ䊫솧侷⤉㊎廾侪䍻ᱥ梂牢鹘硏䷡ｸ쟍虁鯼ꏾ͌㔐飡ቀ뒁㉮䛅聝㡅ꊧ工肁歂靊䗬啂읈됖젾횪튕䏼᪅鈲牔학뽌糧寂斛╴㜭㩑茀ଇ剏狥Ⴏᑯ쏐鬑㓺驢嗪간芗❀ꏩ寁奎쪒흔ꟷ礏⯔洷ᰄ︽怦倉휿掣㢆뾼ᒗ櫕볮킳ڳ儊诊首⤷২䮞㷛⥧쉄䀃㊟㒾聰ຬ襤퍃뮔뉥ꡨ牿㦇ꂘ䡜둻蚰緈匱ᆴ⣶伣ӫ瀑뺁饌ﮰ䎁妮韅䗯敮竱ꛑ팚镬尟朣訯㉄礖⏄ꐶ拜펛ႃ㎅䵒ꎵᄼ헛휯ꚓ㿌䬍윹흕갢潺䪱먑軿ᒐᡀ䤋紙뷦ई᠏弹Ძ噜狼袩뵑ꉶ퐿ꔲ佁㩈㣓㺉耈ⷪҕ꺯ﾅ㌶⌥깚ᓮ啈칧躺Ὑ礝ൃ蕆杜쳡돗糥弎맷샫䅩徵㘅숁⎉㹌붲Ṑ긠龮৭성ꘔᭁ麣㠘ꀁ沣縐®晲⊎动쑋ꖧᅅ䲠뒢㋐㡙ﻀ꽉ҷꏑ锾添糰䡿ᛓ鉩፻⹦惄꠱꜐㖼銻덈厄剤䟊렇৵䀙薢䦒檈ཱུ䇮艗샶骪魿듳ᥓ㙐젢ヤ턘ꄛꔖ⵿㬣닂苠᣿洶琚敊巠놺篭솱耧鵩炃⾮姙鯑ૂ䞝ꥐ稪錫䍂襎鰓ꅈы餎泟͝Ī食㛳䠶퍏⑤뮭ừ蚹넟퓮瀄캐ࡍ蛅顀ꩴ㾫瀌ด뼶壴♱㞐ﷄ掮樄ᗧ蝀狓侒嵩Ѹ뒖뺟睝혗ደ셍膉龡㉶䛐焎⒂뱠氳⭚꟩莜褍⣩갫?蔇ﬢ銙渟欣㏜㖙䮄㪫셃풍禽ﭧ⩑艨鳣璟ਇ淳篈兑ꬮ䤒㯧촇廜貊ᳺ촙셖၊ኆ仸鑚笅黚󣈍ꢊउ謤ɯ鿯예쩝魷⎮裡ﹼ攙෮翓蒓灠嚑篬泋퍢籐胥渴붎ꂄ䕒߿䗫켸霤烙朳쪰⛷擐紆ݒኴ汼঳⒭坟窶䴵띋笵睞鰗糞䲞껮곟裪줙悺ባ鱾ﰛ˺ቀ劜ꅷ嵡㊾ⱦ著봇嗔㵃犧ํ棝㼿䫃⺖聑ਇ뎺骳鱘䱮臇㏷埜ឦᤏ聼椊糼手䢍鮜駒誤괞왹᧡둊먪酵ⅹ⛜㩜렊둳츜⑦⦴鎆桰劗䡂봄⹙ࡣ跭疙䵝ᱠ㬊썌쓳誣ͤ徺誁駆▨ಚ쫁䨈∲풍ﻒ䕰䘐ዔ琡癗ଆፑ吒㹖ᰃ契䘇벲ⶣ幣뺔㧤쾉鳀䧗䊽僚ꑔ㎈钠鱦ॷꑒः뉺췥∭ֹण뗰࿭髪㧸렛舮➕픏흭㞩ᱰ咤矜耣ܑ땱䥶յ劒ꥼ䰇仐吉蹗恮쥭ͪ㬎ઉ᛽鐡뜪㺕薼團澝䳳ⵉ犡㛄⛶଺枈明꪿匐ⶣꢄ⸋忡૤蕶㈊捸佗밸幠Ｐ줽⹺끍ቲ据❣㛦䝏ჺ܀粽䳇锂ﴹﰆⷛꯉꇂ葜ⷞ詀ύ몉빫䕏蠇煫Ӆ佀弪᝸艞掣椐࿽ꌢꝲᥑ쮽䳝盏閅靃䰧ﴶ칋ⷤ쟶逴鸇Ꝝ弼羕럻凓䈦䉗惘忲墛穊ᣈㄛ☜쥼ꎖ拴ற炵둅푝箴쉿㧒惧ු忓儌箠᝚޳箽쩠츭ᅃⳀȓ픊롳문匣Ꙏ祡ꖎ묑蹡凪뼭냟㸤쉱䨟櫮⋒佥儨訕筒ᐑ຿ų쯗剕዁퓖ḍ繒킴竔郼銜辏肎糄뽑욦蟗뷥﬊缇Ḻ㍉鮦赭꺺旪彤鄸素仂ꢯ臙쐠埥鐔ퟍ拊惟墒⋓懛咀뻪䅝캱ᖒ룴샥筬嗧嫤猓煀匈䧳ᑈ໔͢れ昍࿛쌂䍀힇邫뙯樛㏾胆蘌僫读ᘒ㠊奤䞠㡻럽籬䪻酿즍ꘆ桲듴䡶ᱶ뉯뀭앰䃟ᔍ䪿ӛ焓᪟템鯾쎸䍪࿠ᴹ拳死퉊쮙砆몐埸袖쫜䖊ﮤ俟㭳曷钷䱛塼֯퍶꯾उ뿹꽵ﷸ季鐭そᛀʂ纈ॸ騆e쌼爊떜慶㸶柖ኔ씖ﮠ山䗗쇪ࠈ䭉힃몏₾좕写│笭잹冣̍첋ᬰ囎黩䓽軚୹輱䴘ཟ흨爥罣폷᷷❢忣憪պʜꌨ徭칽ꯘ筎璫棯욛ৃ｠峍糅㕱嗧峄⮽췫镫蟗⡀谻蘬議覊렚댍ꠥ取㬁ڜ蹾녧陭歩⻎餜細嶎驀酻ᒂ嬁磭Ꙛ첫ہ丹쾴꒸㤁柚훒ન샦䔝艷䙙ἕ瑧د迱憍稨赐ﻴ羰㮯썇῾흆⟒ꇆ₯୒邦嚀ꔦ⭮岥獗嵣樯ﮂ౪縰约ቁ쳷ꟾ燧㼆믶끨嗏蕴觜蜟躝Ꙅ๠५䓳더痭紀袹㎱箞笄綋ﷱ﬏⡻ꮤ䷎Ⲛ〉ㅰ齵鸛䖹瘲写픋栖簬噽䃻괶┏ᴮ뒱㑡፞菂ꖠ䤩䉡儏Ѿ찀賉奱ꆃ晾詟篴燘꿥쭗닿ż䍗촂쓤욶퐋媛싳磫ﾹ봩訩抋댐ঃ稶㘏枅䨗某纑털貤뭭⯧칇⣫ㇺ톬Ἣ䲩嚧คꏙ轱肐똴㏌㠍髑搏縸䘹뾼漞뭑旆쓀礉ᑇ迨♹嶖ﾴ丵⋠▌䩬맲ｊ㙵砎擩Š钑▐䍩肿㾊蚊蜂⥎⊠݋襪쓓疏꘶曗뙹䇟֣ꕤ绰悃㯃鮙阡꥕橺쾭住戍䃩ෟ⭀톾༟嚠㉠쏧䷒岖ۮᭅ綖砩ꬡ䔚펳뤠ǣ왻뺗䮚벓䵖︴縮컑ኈ毿籇ㅕ桌ꪡ僛瞻俨ᤡ䍀૕ᗨ唵憎钤ϐ궲忻瀞읽︖પ约鵈宗뢯㒨䓟劇ⷃ虴품山塼湬蒽귬惨ዒꞁ↬煮ᤫ﹙丅輁཭ડ埨귣႑쬯ﮢ꫎큙⿡羘駫톏̌䇂ﵜ縿ጮ欮뙀햝儦Ꞻ頁ਫ਼⾌㢽Ŏ江摫앖淗༟竕쳚貃繵켒ڿ㨛㨖旾蓵袃릴呺ꅎ郝ⷞ쀔ᔜꋝ놤㯢솏寳롆們広焽ꄋ＞짱ᮭ媳੠Ὲ㎭툤㢩뮷悍꘽娎舱퍯❆驵閚ᢡ栱枋譋娂Ⳬꝥ붴抔틚સቁ躜귊캠䬥虺ᱚ靹앲䷰⃛죿ꫬ呪䪦랗㢹ࠫ簱媻⇣ྒྷ瞁❏强煔꟮᥄ἃ饶꧛⑽㓽즶뽮⑯냨쐡鱚ℂ椠馽驔ꋲ鬆꼴摍᳦溂ᮢ븻萩膾ಈ崰ꞈ囓䣴퐞⛄雈췺菢톚쭧踇榧캇솗⯮醼赚ᆺ᠕봴來ᙷ現㭲Ʂ傤㝊⭴丷섞퐫媛쵄᫹Ⅴ鬒ḥ釖펐㗗ᑐ毑귝덿嬩碍Ḡ㻺箳ꨃ洤衭䗽搅⩡싱뮟倦䌷儛㯃폰䈕玏띊ᔳ鍊䲍땜Ე煔㪿냔ﯰꦞ㘔ᴍ㌴垈놯胤㜟鲖쾒阁섍㭉椲긁洁ਈ選䇲崛萊㛳㩡뇯絆켮໻뻝椏羯ꛈ枯㻸瑛ꪄ㚜魨䯅෨ଜꈘ밸ﭴす৬Ó広视䲲쨺ᰁ传ቭ㋶쌨콱﵋偧ߘ㧶⁫놏฿ꀏ轢댽԰ㄯ︬ㅷ퇓ଡ଼啕퐄ࠉ䚾━ᩜဥ䞃ꏢ눚垮ﻛ⸝엔⁸⹵辘䮦潸ꩮۂ샫쌄✊ﳄꉦ尹熓诞ᜥ慣醄恨ⶺ钢꟤䫒Ⳬྷ弖➒蹪ზⶀ丗帗ꌱ면裵Ꚃ僳⛻௷봼晻⧷㹂牲ꢕ袐఑ሱ㫁㼎ಬ鴊뇥줢肇᥊鐤쏋䕊队푒顧쨾꺴䵈쏍䤮驕렞㠛㬛䅍̀秌棁輖趯ⷫ쨈垜妸䐵᠕픖釰䋊ꦠ奄莣ퟃ殿퐧澟Ṹ㞭ꋲ똕可鄨ﰻ楜䠗壥졤灊ᮉ눛䡢船棑窷ꀡ괒姢䜕딯ﰓ졊噓껓纣䩌庱︕⾎ጅ燜㗇ୡ磟恨⇁쟲㔥漢⁉꺈袰憇➥帚䭟羪ᒬꀺ嵿賳萪㩚퉤剰㡣勌枅폅ᕚ댒鄈網렵규ﶆﳌ乾͞멂䍉摟냬᷽ଧ㱶휑胁㜑−蕽倡℮ಆ隨″蛨䴱瀾쥰뫤⸵౦ざ뇞慓䒅혰寖՟㧙鶴ꈝ煍ຯ龛ր帶唽ᦵ䜣艇虠କ鞠ݫܮ⒖❺痬몓譢㰱㻲Ầ閜␑렵묯쵣ퟕ턛ࢲ촪椌ㅡ䱳퇈ጅ빥钰좁쇢煳悔컦ⶶ闥獈逝춡䫞덲搴褏湋껸㼡秜꫟玂욗픷詴;ꝛᜡ浅௼օ೙ꧾ㓹뺺뙍䀞댆뺥ꘕ揍ꙁ렱ọ鮮ຓ꼽⨶俀뭥䒚孻蛱䧃奏剶睬ꇧ왍圠鄮簌긂䣺튚堋⚯蓎檝㓢ჩ<ʵ섗聃䉢ꬒ㇂䇐ہ沰⋈혠젔Ȝ塥ꬴ熓밶冄ﳰ塆쟍퐶ΐ賖ꞵ凨ぐћ鍒乨펍댪ꢪ맘嘻伫ꖢЯ㑙ᓃ㖮芧ꝶ鞥覂中音鏲㤻娌劐늩ծ栛契Ⓟ봯⛭獲䵠㲀羆ﷻᇼ泓儲ꔃ譃뢸꽇鏺侵㊶鮅푺릱ഃᕍ顶枞獢弸្峤븭學᫆㠣ỽ輐ఎᔲ錷ꎑ﷽뻧᷁雿貈ꍄƠ哈棅ᶯ䒉ಝ⣚ﲟ⻃㬯ɇ⇿Ꮃ粷璎ㄐ荑῿䀃킿ᜳ疜쎱̇ᄄ힯躡㼵ɢᮒ蘋ᐻ擫換그䀇ƀꮜჼ稠㈸᝶鏹蕎塂࢞犭㖀Ꙟ最⡭ↂↇ詏谢봠픃ᆷ嗁୍풠薓洒ᓇ毫⦠瞖랎굘⯃맴⩹媷ࡦৄㅅ㉕螺錌ᗱ솛岮詫哈뻤钩ᾠ頳텠௨ꎬ虜罵⸭俺废垠뻉ؚ勃鑞慨婶뀊詏陬磛쟨ꀣ胐릾쮰鰏ៈ䦒韘鰵퉮礋Ղ쉕졅弱帼픸月ᐨẰ㠈䜁맺㬲㴳ځ黗ꤤ짷萴䆾懦솦罹ᕠ씠憧ࡰᔼ䃪✍䚹㩞☮阄㝯ꚇ碅뤨돠﫝쇏꓅兯傯ᦚ衢凚ṓ硷⩭旿쫔쳠숯폔늩쫤샡嶜珢ꢪꂛⰥⳄ䜹퟾ᶱ컱콱㘂ᵉ썮踶涑夂旋ｷឮ딣裡༌醣⧅쩱਷宅鏁툠产玓葡洬꽩沸뷒ӯ끡볐들坭㫧儂徬卅ꝃ䋹縬浥퉪晲鱚ᘤ能潺궬侬띪亚⥋募ᧈ芄헝㍘⌷篥㔴؃軜说䎸휟䢽劺筨㣒⑓倂稼鴜拿ӏ潋ꍨⴾ숒崠㜂᪥嵃郔亄剼㭦雴됀쾲ጣ䆘⃼繘欲毓䳨뫞꼆ꓒ₄뎫쐞둺붗⹌钲賐떉緱⩅핌఍퓸體婁鱃縎駵ࡳ䑕ꈞ깶㎰鬫꫹灘뇢욮댙騪勊왆첮௦磬촫쿛择䌡阘Ϫ탤庄ℍ夫쯾㗀꺺䌡꽯烇ꤛᆟ磩㕧㜐ᨺᓣꟆ㐘䞑ᯖ暑䓹ꇬ嘓셯豿瓿▹搉⪺✬＿족梷ኤ艺ꭔ譂娷줤➸첝酅ࢼ鐖ᇒⷂ≍溃༷꫱쒸璋㕐⠛၎㙬㟶矻က虾ꕜ쿩榏앉ꚝ坫땡ﳒ੩꾪⯝Ḥ䫐쥴뭔曙薑㦒鱔樧桮䊰蝐᝘掀晫愺㕓睧珻褢쁾㽪됱膎풕訯鰗烋냕淞굶뾼花뵟舢嵺絝ퟥ阑㨤ờ钍ㇳ䍦ᑩ걘꾧⡞ൢ䗩쀠髠썊焬憤ꋍꤒꀜཆ윺퍩᷈狟枏즀㽗೥⺝ό꫾擞ｦ년ꡮ￱泏瀂뷘댆哵ँ츿ຕ㟺拢쓘ꛋ鱙錙䕬婥ᬭ䞅᫋⪝㓄ꥠ㶘ᅰ妉ꉍഁ圇␷￧ဠ㋞꟡㯆㍀穓ꉲ栱圚푁碶Ἳꀸ륃툲铑칂턶釁⍕臙샲塱藾ά⽕襛镳胿벗餟쏼᧕鲪୲嫣엗龛飬㯐楿䭩삿沈咱㪅䧴մ孱℥溮໨９뻌데佶⟢휗⯕䤢반ਃ铽䝉㢯ὥ링靎赧ᝈꬱௐ뤢ꕝ䄘K䬠噓ↆʘ풟穟ꜘẛ땑Ɏꉖもႚ륉㓦盾蛷፼蛑᣹胁⢬❡숇㗤剐븋﬜岧뮀Ҭ݉黄䙆ꇸ훏㗠蜍蚇뼈ꣿ⛑︗낽뒳贽ꟊ멀⨌燹秀ਦﰐ䤑韋ꚪ䯺᠞橺箙ぉ촳븨挚뛦❊ꧦᜍᦁ뀫Ვ凱떤腌汞爀ࡋឍ薅륺탡랷ᲝṎⷿ勁擦퓝犵捩숡蔃ꏓ繂㻏㕏伆㟐✓鴀ྂ⌨ዟ柄瑝Ʇ䬱ⲟ랍㽬ⳁ臞罍䁚톺⎇┸cὧᯨꓕ㔀㊫盿梨ꪰ陕絼趩菩댦Ƛૃ눾䲧켥Ι꩙삛ꬶ⼬龍Ʞ慘녪力㴈댐ꄬ㍀森얎蝫蝱曰鱄㟎駨눒ﳐ䋇땨๘즸䉽旷ů䂢ᓋ倮琡퇝单㯒冶㴫ﻣ⾸ꪳ䨠啽燏䙥픠뵽짣ጐ둖꒜禧汛囸升㫪㊖ሳ㋧햎⻹ࣼ陁᭾뺉㱸誨⩟荝ﱍ⠳끱⼠稢졻謯刯∰愠朌ᡚ㄄₁彠绯⶧ᾜ줯✓ᗯ᱀똷늜놲䱛鶜䶶ꀏ횢澱בּ민￪穫훽ຄ喵킓䥁灛奿榋營䈮༤᥇뤃遮￘솟ꗵ번冄힢篔觓혁얬싙隒썿ރ륅ﴓ퟼兤ᖌ곪磿淚⬈᝹抾唺둖㤄甮ਇ꒯ꐧદ飼ߒ礗喊ꈥ⠖﷔啜璌柤씵᪎䑾萙澵뒛嬿㉞䆥떰횀Ⅾ뼣ⱋ洞⥈콴ස饷熷⪣满舭㲝ࡼ戕斱㛠閨꿽⹔ု垳쁬鯬黛憪䉩鑘웷宓☮쀜䗘⅘ᢎ᧙ఴ蔭唭翛鴅쉨啡สෳ㧆韠䇊짠璫阺⠸鴫잙౳熒鰦탾테박쐖ꍷ榎툭仱㷖ᨯ너侊ﹰ怶䃢☗ꏖ簏䲟鑪㫷賄퓖遲鳅侴鬈藠좳뒯⨣诊Ⴟ鵦캦炛ы쪨业診⅐υ拣㷍쵍淅쾆駡柕兮哑够㺹쎛偕䟥؇᝗摣㖿軘핆葺뀤駺ೂ㓃䋆ᔂ볨䱨啝ઍ슪ꄃ뱭椒齱ꄨ囁倵쟩⥁㬟埮즐正৿壎跏늶ퟹ凂ᮢ海⪮䱵ꥷ黙쫁涽ግⅈ뉗㟣ꉀ꼌䥙ͳꃬᗰ䈢증맓宣勚⚝쩚筏浃屻緛敢৏ꋵഉ鴭롔㷉衲ꤴ葩껛狦琪ꀆ賨卂硶嘟퇌ꨶꆯ倢峻跉曯ꗵ঍辒ᎇ䩕絬霯먶쫍᧺玩즗䝛滰碌㫦쇔∡䰗唧⸓頑㙻崊鴼┶꼫詃㧜㕘鐸奚竪鷡柏舀酂릭聇뭚ﲱ䇁쪒㼽䝟犾Ⲿ桤偷믡ㄥ᫇꺟悰訲㰫삾㿊恮蚛ꊝꭍ汛딀鞞ꓙ㲜爵﵊ᅽ컕暭䁘宍ѹ왒㐴稑谭ꨣ聜◗᧠ᢴ쿋Ⰿ抾끣ꪡ梒엵銁㹁倾퇮츜릭䆇ɮ㜻쐮ᵎ됇脌獅莌䶹䴲枝拠㙂藎д譟犑⼞㨠꬈蘗엸騷엪䟔껇׮ꄦ텄덱㍯렑嫎平낅暠ᙸ㆔띄㙔侉ꧯ룐䑔쒻䌰⭘焈錡滘୛௮⁉픥⬂樅㔔痳ꥦ烔矂濧㷠⟶摛ﴵ炑迾ⴺ醜晁溋ᵞም篇⟝媠䦪ㇴ诏滤湱傟솑칻踾粓ᄱ絅禷ﺬΞ傏ꩵ㭃뜠緅㔒ᓌ躘ݞ㫧졛ধ儤욑⎱ା檭핧ƈẾ㖛ꑸ軭㧏̓磜⻽橰♰욹깏㒮멬嵻满쏌꟯퀲т믄Ⳃ䗟廅헞꽄属ꨙ䔋屵苖熛ߟ桪෽ﯙ䬶ᕳ蝟萼嫔娳宫謩抡仹㮈憾⅜껛‷㼪늓쩄否窆ⶨ﷛愗圌튤䱤饦ᒆ탳῕愌Ḋ⓯ꍓﬥ듈ͷ礁꩚즯ꬰん妣㒒㙽骒㠺썝邥餒篔└ꤷ䔴൜瀂퉝퐗⚖䆁诰狺욢⼿ங躟烾쎙뷶锘簢ꉪ㖒媝﮵┥衮㖌緶솮鱛￺옄괨韰ꩮ龯擺넫⬨␤찏댆ミ⇝띶猞鈧☐̉墘弌踋⟟桪Ỡ檢甅ꝇ⠭䚽㢁䙊ᐲO⪖＂䄍篻洙抷幹⟪ㆺ禎槟젺巘뤦㦻徐鄟渿⇹෼✫隹羺塀䎰䇤듟庈腜௄Ӽ엪䡞㙭팏쌘瞖䔺ᖟ࿫䱷뮆訑Ẉ㧫磥䮋熦텭즰⵸☗氥混歿댓豄ࣤ艟韔⫚擂姠ỗﾽ䷝䝞칙킍䆪닖紲莍䶑潀雿ꔬ쨣㑞Ⰳ쫌체탥劭騚濠礊諪낗邏햆鮸鯓ᮾ曊可垃䱫渦鞡熯꠷驣捴싍퐒嶜἖栫羌틢飨ሟ챁ꊧ돼儚蝳泋ꄟ㛈倞⣇뽩䬇栳ꀛ特夛뭲싽ꬶ䲗䎠貴扏皶灛ꄫ㴞ﴬ峘ᨑ㋗趵㸹趴胬嶡ꦖ⃹豺魎墰셰퟿Ы惩ⳮ鏎៑㝸ﳳ럐ᚊ⺨՗姪꼰Ń꛶듹Ꮱ鴷왽㩰踘疻埘ѻ胝쓰돂㡸䲣檜뱧잸囍徶詩赣퟿렲蠾袘靃ᒽ鴆㮶뢴ᾖ庈䴡釜㲒㤪崍嵅鲿：⏟䛀鶯䢃恃吃韦␥Ⴒ鿋蟸琂詭湾龁誒闈㘂腯㨋羏献霏੝㐾✯퇟䜜♺㰂꾗⡌⇣╽娳ᯰϪꢲ紎頺餞䄐풱ᒯ濐虃вɣ䯋ﳃﶟ䃞륡ᣋี㫈隮థㄵᘭ櫅ᚵᕏ쫵਍篒郩뉰⛎橜덧猇馡蹷垓骖覯᪵䙬ኦ⇜២㰭犒㩬捫ꕏ旗ꚙ龼ꥎ侷鑕핼㒘쳮⠚罽胤缧ޑ㩐蔮躔ၡꀶ䪽獆뗮ㅽ諂숇鱫枚ȝ౗ⶭ⑝䱄㐾砉⢽˳擧橊뙄꼂ᣓ༏恨玺吧瀙ᡃ䟕땮᝴귂瓪狫豯휌䍊䁈も慧쩠൩ピ樵锽뵹樑䌕᎗썦떆槑ល쵧⿎뚵䍵ꗽ栮Ệ我ᑓ걋뤓ꮆヶ䵮莜᭢ṥ즬퐶湇ꓖ잟骉萂ퟟ綨㥆煯┧ㄪ裏ᢄⰇ⿱돺㺘ᱯⱙ潄Ṩ溼㬞涖빛믟ோ蔜⳻췅賋⥌ꄌ诲砱⬄剡ᙙᘍ䯜㽊ᕕ퍽ⸯ糞㥤♺﹔其쎃襨幤댜狒莞朾妭渢㦏ࢿፁ栕뮁络䳰菝捯㗸ᅤꩡ凁脦悒᧯硷蟊쮋䭍쒂ꉤ귆䲢肞䶚᧖⋿ⵜⵖ즎㛼੒졠洂䙔㸑촤왶ᮊǱᣓᄘ㺹⠔ꡁ뮾휲Ẅ噾‧䉻䡙賲ꖥ♠쥉仨ꢕ垇횡폇种蘭ῤ䄰鐤좼놞싗鑧὞톣჋⿢笔嘨쟒冰ᤞጦ‷쩢㮁班ڛ﬇禬龢裓흇度獸䀢맏ຮ➻ꑽ喪箄玝뱲䛚ᒮ씾⳷᝘譭㼛摂羲鋴ྫ烞걜澩맄㰓毒꣎悀ԣⰃ뫯唻Ꚑ鲚欽傄ꌍꙌꌦ榐䩎魩뀀᝙輣噲謪ᓪ鴼൭緣凃茣ڠ轟부딉䣩硢꒑麪繋疱诈⤹擁⿺ꔴ浕ᐵԡ鷶ↈ뢏衁≵俳뎌⮆팁뒏㨬ᷔ垼ꞗ鿼醈㺇蜎䛐毷ഃ荊柮䣫므쾑賩妫㼉᳦뎥沜ꬑ뫜睷苒숃ℸ㈍檈䒁ꌌ녉⺏땴궄褲碔ڊ罓壯笱僕掲홱킀Ｎ㴘▓茺羪惷垪︶薼畡睒夺ৰ炏卮鎳럁뵌帑㭃迖칹鸿列腭ࡊ㧠剖뗫᤮任鐊鳮瓼㥠襊國懬执ὠⓈꠃሔᤐ㪂矷ﳡ縒䠸늎奆梒繐祂豻岠ㇻ죅蚰앻離ਡ蜍罉莜鰔ⴇ셢䧅珂奎ꌐ喎ﴯ끥즗뤦簔䤠鄎㣃䍨শ믈͑衸氇찻ᘎ笜䷡鯇啹ꑏ틣獨റ㓾꟟䭿樁僘啿탒ෟ︼ꁹ戫坖鉭읖젌菞涥啁錬낙ⱏ겁윚怛䌋擅㸩빴퐧⶿♀녂ူ 풧隼耎Ꟑ븤ў葉텠䒟泽爢筙᷐㜑⤩梄焝豏Ǣ㣎栣ᨾ鏜䯢光铌騥ꨒ楷읭鲻ᒤ䨒䴗㺔꯯膁䱵鎞፦砋휄풜锗ꪡ
+㥰뗤횫㷼앂䄄貮꽅ꎡ焀ӂ렺ӳ攣볍ꎪ阙弶仇䖓㏉⠪ꆓ祜䑓缛켞⎇切〆琵晎㯯쟟풸猵藒柟㽪拙舅䇿쟏唑㕰棫﬇䑵弮쏀䮺뿝授閩鵦鎝ᓑ稦籘躢 㵫蹲忶名扲㉁平깘ʓ幫볶⍦૱눧奇꽅묻樿솸룑绒뭽㟏淶饒媴๭⩂햟喫㉳ꕟ娰㔵关엷馳ⱇ᠒⯣衝莻悅ㄈ隺ੁĝݍ®喞魆ࣅ뼛쟚ጛ葳Ꚉᡃ措佸唫뤕︲䷈뗇냡쟚➓馳ࢣ重ꐃ础᳏誻훆竬뾈칣䫴㥣辻忔䍈ꊪ셔滫㑡䆌㍮᪴졥肱念瘏䗟穰䳣瀉ᓰ嘔ঙ总໕睉筃莢铑ܡ豭∬㼊ߙ꜏న嬟᭐鸂ƙ⒉螒펔ꄢȹ㤌瘙㟢ꄣ唈鞪晑ᯉ柼圔甪ꑯ쇔0ถ뿦௕蛼샙赟丛施馮䲸賒㮴㯜觲퍵湄ᗠ硷ᱡ砋稀⧢甿ꘖ㒵웼⯖噾青瑨矅ꡊ摬洯띣ઙ寮ﵚ舍⧪㯛ؒﾡ啽ᵌ棕㧶⦨姭敒䒞ঞ턮飥堢嬻臔ꛛ밗烁櫰罳밠뼾맖儱憁퉋纵㤅佸铞䬞❼쓱뿛흒઼젛卪鋐熏갣꧸ꔘ䄮჎쿵ⰱ駫把䦧⋶祠請콇睋沵礛勶⁵䓴袧ṧ冧藟蠺쵨㫻핾鯯翏ꇮ⬵卫澫㘦ᮊ㪊䊌돷ଫ犕䥃全⸋ጀឃ᠄┴䓱맋踭芒⋉㌼评懲臤ㆁ帥ꗂ立껉䗆㳑ྱ哼䗖랏ꃻ舟ﱺᲾ纽䲨牗栏챗蒦㳊⹆㣵ᢎ郆䗈ⳃ⚚༽蕻ᓷ푩㡷탑탂浍ꖱإ鎼뺂厾⼔Ṹ⺊브﮻瘚䭹뀙鱃뺃篺㹝⡧谥Ꞣ㇊䷖㠫䈉贆䩳व뾆馆ብ㣍饪鲅깉ꐹ겪䶟炪ﺷ騤뺆洄叞٭⥘߈朒ږ斕䜷蓠䇷ꙮ尽Ʃ걩顽誱倨᧍ﻸ५βተ幄❨翉ꭹ㵥✰⊪䪲뜦俧梹䃱褾癗ۓ꬐皢ⵒ㵈퉎ꆅ麃쿦炫뿊㐟颿म衿≝롛必Ɱ冾㖸㱲Ὓ唂㼗卣(徱뽠헀ᢚ턁ྦᕏ鄡⊓쇱຾ᬝ䲰ꛑ睽ᕸه傚ኜ窛맖叠테᰾煣짜ጽ㨜뭁뺦⃢骀㈷䓴徙㸭〖铒䩘ᷠ磌ᤍ鶫⃭훤⻠㯨㕛赦쵼沄⠃絴舰娢鯾蟨࿊᫭⁅鮆狒늊빚ၻꍓⲭ᮲ด㯩殧ҿ쪝ꔼ⽚ᔛᎼ츎齶ꨭ凌誋޷栗ꘪ㽎䚄䴓坾靚സ뭕⥦鮈엤翀胋謹懤늹䠏鿿蔫䎎췆藍渗蜝ﶟ恜舫嬏ꞁ莔⫥涙癴厽㦜뀕盾姣礵╌콤娬钝ඊ犤࿪톯岾풽ଡ㓶ﾜ斈廧葖ꛭ⣉妆锒弨眴뱅⚩鋒ᙺ钨蕃籍瞄외ڿ玷ᐭꊪꉣﳚ氖く⵹̊뤑뎆◪絔⼾⒭닳ꇸ⻌丿櫫ꑀꫣ䫸պ탹풒ꝯǩ7꽄ㅬ㩵돖๽䦮籋쁉㢵ਚ紙抉啉㯐⾰⚰扫砈䤁篡ᚲ糧狼㭓週ⶊ櫻濯之ꛯ톆郊ｯ඼摲싪잴涯फ़輆㍍꼏敌樤萶﷣锋ຄ淽铭售▰૴倁鼝秪Ẫ猶옟皬麟鍔᫠蛟뗧ᛠ蒽쯽ﵰ菩肮䋶땭⍙ᐥ䙱Ӡᥴ횁ᑒʉ㟐㠕ꦞퟧ鹉ㄣ뾇䡠䳗낵ᮞ싞㐰齍承՗⇭ஆ텝䪿츁볅艜晱伷䁴ẚᒚ蝈埳卣䓫뜒க阝⦔蕝㷦腑穎敱먜٨切ᱮᑥ̀Ẵ룝鏢䅿杭뢰壛텪쎲ლ悖駺䓈岾⊓ဂ剢咆冀챫矋튨舛ꖧ№㘐값㡙瀣᮹㴟ʓ䧎㵻뤠斢枲쏃ో坚未高꫊旂紭ᄂ䃎슩》㡄陼뇣仇꾒㱧炛巼仱ꖮ␡ڢ숌蹽ᤌ㣟쵏暜翆̱㻙퐬వ꾶ᴮ⦶⾼妽遾鲳ఛᅩ캋崥ह瑧樟퐭ẖ狍｠⮐ⷐ揶矑糿⶝६纣◿ꔤ藕妲ꑨ䇇넫ﰁ榾禔馢儲䔠遣摴鮸ඏ㕆҄㻂ᮆ䝳ጞ៭⦊ᆠᨉ᧨ኆ᮹턉娽ᵶ棉⃻쮕郀⨆⼈⮜Ꚉ뛌㝵툢쁌觠俫쵛㠒鮋䠲身踳憼بᨾ굺嵔䕍회ﵽ％蒹ᙵ柿麖㫱ह蠟䡓ﭠ姦듟㹚ᬭ㝦꣮腺냆閂돞８펻涙ﴕ౔టţ᭩ꌚ괋ࡽ귢⹦౳狊撍Ⴖ㥷㏥씃ߵ앗զ미旞⼪ꉂ撥ڲṔ裥ᬦ⻖꿹⫾ฒ카폤β霆箵鮃硴䥆谺咩啐䊨឴膂㨮ϕ焇鐻침홾坺윋뉳ꤸ磬汉땇ヶﰧ椦甊⋉䑶컰裏掞ﬕ禐䯄汧䔣ℓಒ团☕灠돬ꢒ瓆絤渼낒殮ᳺ⻕鉔鱟䚃ꎦⷽﷴ⇐縃⌂篁䌸ꄶ璩㰦Ꙉৱ⍘坭䷋㗴꼏弥臊혣ﱷқꪽ쒷Ľ찼寗爇￟ﰂ礅㎪둘㸋⷗+媑㰹睊泌矼뗏嘗䵊楷纔깥팀߁겫į舂倮텧あ똃㥩䡯㟌絻鳠⇫鹁ヘ㯂坓㱜咔飂⌗Ϳ糑왳庛䧅눟ꞁ➴劥㝻뀰孜（ᗵ畉洞횡᝟꧸냘떎烽⻩甈몣붏쾢␪뇼ṛ﹜뒇懳橕ⴼ떯䈘嗗꾨宓ﵒ弗넻䬬瞡鈽㡒感፱菦Ⓒ拖⌐뙺녰麉䲒煮ቒヽ藺䡢ᭆ皰햦饔擌珿齈㒊陮Ჸⷲ謐⻖펮햕祝㾲覭ᾛ嫖葻충睃뱸䕆ꓠ꿢椱铴邑뗋ゴ〲斍命烪惥嶚⌷ﰩ䑍緲餳瓟켊见ꙮꭔﺷ՟쾙義첫虿뺿䵓讫祧▆ㄜ쎍歝ⅎ롡匨齚扵㓭聎ⶡ옸ﾱꤋ䗐큵衙ᯋ臀홈ꀶ侀贡ᩰ켢ｖ뼆É䏸䐕㙫枤䖔ᥝ인אּ竔䀏沦縴쐤◓繝⥉о篈娛ନᤶ穫覈ﲲ鬟餷暛鯌싇䠛낈᩷譚ㅲ㒔騗⋾ṭ⒯鋂垜೬Ҝᐪ䱀뭐杜掝☵왪긵䱥⢫䪩ꩳ쉮ီﺈÉ뷢ݮ霟ֆ샍๟ꍆ才ﶵ뤗怓츪都燉㻋풌矆ᕢ㛗⨽Ńꖂ硨倉艂ᱶ銛씽온㡮鄚괈꽂掍ꈉ⨓ὓ㰘ꨋ鬰捴륅ȴ旕넲掻ꝉ쭢勤ઁ꒫鍏䜅䉅潟Ȣ垻۬晸䕷ゼ楗Ꝭ臸퉸Ń渾ࢦṗ鼮뾲ϝࣷࢍ뚢ꬒ┐凹늟낤螕ﳇﵯ톞鯄슣萴欩ై烱⍬ꟳ猽뫞넓沶窳퇝餘儕㤺ꟃ憸䀏ᅡ쑓ڠᙻ彺쾥鉰왱䏑鉙׳㺿嚻氧쮇쥢眣哤蓬囧鈀紽钩㖐單ꗯ젦征ꪩ駢฽ﲭ⸘ｼ쳰⡔Ⱟ믂쐾ᳲའ郪ࣾ忒ቷ﷞੾맘䌹リ̄Ꮶ≱夁ꪹ탗룄➾㈷ꘙ幣䑇桌糕Ⳇ崽㢭칂⫑ﳜ阌蘂ﰞ酌蹝礓瘟⿵픓㳻멣徾鈊⪶뫺獋ㆬꢼ叧倁笲࣌謌薧칲錑䖅ᐤ혁篱덋뇈䤄筑폴躔⏰麤쇊癏嚰䌗딣칸㶢澇Ḑ䙌蒉ꐪ蓛殚ﳣ팊剪봳꼸坆逆䅰杲ﺚɅΝ㸟盼ꐿ갍혩쑺縐䀣㕫ᑫ扥뇛굱흡ꩈ᫉礎楃簼⬣圤ꍗ쵄女奍ᚱ뚺탥芫鳒ᓁ팒魎礜됨큛熞喲Ơ헰≹홿䱿쎲隡铄疤鳮䀒㜵⨗鉑䲉⛞㼘霱艈⺺ࡥ䜅挕丘웧䡡똸꒱黜㷵ѝ䵍퐢ꔎ♵촏쑉뺇琚悚鱁뵵禛紬焩䲡쐎≜捎덝壈ꮲꯊ扉讀疝铆몦ﬞ禪檊높襠찝뜎渪倱盞䁔褕樎ᯅ첔祌ࣗ림뱍팖뙌垔蚒ው毢䜉盜쒟ಝᘻ餜싥ބ㭴㚻坧ḛ員쓩鱬窡왬ා䨂ᄬ⼯ᒶ퐬誈度㞸቏舖שּׁ혾腜ﶍꂁ带Ʇ籂ꤹ蜇욒〉揄靪䘞碻盆鉺똻ꨁ蹧缙ﾾ츏템潪쏾榯૦諯ᴌࣝ뚂ኺ⎶鍇꾁䐟셑菑跣䳰寖�끳㚂౯ꉁ䕒읬⚄訌ಌ䙵⣗翠걸଒묌ɘ먅ཀྵ⺠傁襢ᔵიꌾ堮⇟⵵坹種瓒隟욙㦥닶荁誙ᭌ썙⩳ﺞ䕮뫫孼ᐹњ䂛犜里擘뙎⺃㖇㢼煩헼ㆂᷛᜫ穱䇂䮵䊬軿莴愮뜹䞁䴕꽁ᯣ䎱痙竿鞑샸彈着얹塅툈㥑⸖컸瑴盇睁逿ꋷ㻓縌틨朦㶫悂㎟駇櫪퉈뀺跨㱘ꖍ釞Ⓑ䩆㯒䠇ὐ활旤ᚴ犢㣰檳耭૞柼飅뀏琈堾ባ㗓Ǵ霕帊껐๙嶽ꦣᎿء蒘螄씲ṷ䜾쌩暒겾뵶䝇癣팳둦럙謚⬂閐䬇诽缏餭맣髋䕟㾓ꁂ㈭׏蜃놐ﭯ悇ꍠ맠毟뮈禑㟕꨻⟰〗啒䅾震懲䉲⡥⵹앦ჺ뽇굔춌毲坰㆓塈븼낉⢋෱넒脯騗╈ﯽꀠ䣟檷黎庉䞶ꊚ祶䒋ꢰ∠튬⾧❬ᕯڹ촣뎊䕤촧댌좉諲뎦鉮핯ꅅ襦✺㋑案涕᳐馯᫑Ᏺ⫞ﳥ釂䩦财᳄溙爂쁮ᡯῆ搁䔋ꙻ璏앲ﭱ쌏봘蠿䮩估﫰紪☶屷倊㒡藌蜂輟릟蛭祆鐼丰燰鴼잗㤚㹻Ⴕ敒溒岆넳鎎癉Ŭ⌃鈏잠䝂䳪퀎豧拟㎔悎̷剌컥ᕬ﬉귡ᆛ亡ﲰ볧唻촐纬숕Ł폏嵈敹蹂ᣄ쥘슍⺗佭쏫⡀偣钴涒髮뾌Ὅ㞌䞔趑箓Ḥ錳氾ḳ씪鏑뱑﹈Ლ厤ﰏ퐰ᏸꀸ武磌ꑹ름犖휆헪悇䕑㷴ᮾ켒ⶩ㿪臃홑孉씟땑䈿뇙⸹诙銂篍爡㦢椰핋憭֡픞觝ࣨ苐౩㲼”㑗䑂븐鸝랽㬫䆗붍軥烣绕颢༶瀕零矯蠲ڸ༪䦊硗쎫㳏흌杽愎䧖绯䦌徼粱땨륵ಱ洧᫴⸔⤑G䗏觅굙鎘輀䜜︲膕竌䭍ଧạ⮢魲樇荳⮛ᅓ铇놺ꦟ鳄憖쨌銍꺡橾⺠ử쌳燩臺鐾⨝폖厭㩭숗쏏诪驃쾒舣☤윣⩞蜳䙚骸ꨭ媙ʠ貏స鎭ꀑ᜹䰽椴ᜥ볇㭌쑃㉌抵팛⁵⚒絩䗈뜼ឭ砼啎阛⿉㜧醉⨃漽䄡乕垘촧⤂풆餈㾉瀻䚿ᯔ✭㬺ꧯ맇彃ꍲḨ설ꎰ㭤ﰹ듘琵섩㻃屶鬛뻟岭忯ꉨꜭ떹ﾭ鴬デ飗쭪ᢐ뀙㚖璘Ҵ證숾ꆱ㿬᳎댉췶䔫䧳鲏䮶捛ஐ뼘㑀⮅䡚₤ﮠ⚦됨⯣ㅠ秾实䮠舵餧䍾헧Ἰ豌┗Ꞵ科փ緡凓峖퐆丞蝳㊜門鞂䓔괃䈧웒쏁泘太姼ӭꔜ䡽盨칧汪ᥛ桟㳃ྎ旟ቇ렜넅ﲓ郿욱啅晀铜ưṞ䰀ቩ渾᳄㓘蕳︩돤䟣ᛇ㜇㤢姙쉓ஃᒁ᲋澝㷆뎚꫖뚳㻉쾛着꿖莰㨘ᇷ嵦ဣ鞂ﳸ㠬멅颋朏췭除㋖㑋ꠎ脊̝䔒烈죃ᄑ볬ꘜꅰ⯛晏췿嵲庘祳隘贻ﾖꖋ짍笙꼉ҚǢ夃㞏埐众퓝骅깅⨢趖냱鳱ෑ䏪앗桖᱀䊣࣑嫰⬝뷎⧀ꖗ腾ꙕꌕ挳樈 濱賢㚑荳窘뜇癡鐏貄鈨ꬅ拡琥尕ר㸰જ㽸尋䥁젨껏ᦫᯖ件韫뗈䆈켜ﶚ熌䴳ꎕ嬽䠑뺣ஓ쓭夛汅鳚宖挬쮈或￠緛쾛⍎ᙝÑ稯䡴灇卻睆强㒡諹̪Ѭದ軂哝颥옘仑藼爷칲뷝⍩䡄䜨倆ⱖ點酪䑤홫甑菎괯賀괳䠁ힲ봇㹀儖쵖윮캬乸䩸琯茶ߏ箝쒈뇹ⴺ볾僶Ἳ꽭舿㎅杳㊦殡탂焙㐑딊ﳺ邼瀄駿환⋣镧ࠗ쫴ⷪ⧐夡텻쿺繒푋㬙㳏￐㑚쐜髪랡℻楮髷ǩ۲╢埴ꑷ䤱Ȣ㗋囖꫔ﳲ첦笰醧脮ᇚ紩㰔殱銸⼡⇢ᆬ郛䶥绡⋔䷥䥒绮ꌖ㘀씨⪯⮿뤟⬕ꕏ䢩滑嶣娥헅℟퇑㚘夀娩씪Óᗫᕒ嗫ꈧ둏媛ꇉꨗ⺻㥴Ꜥᬃᡳ鏫뵾溑壾斏⛁ㄦ幕䞈な퇟䤔䚪涽ᤀ饑兖⑏봦许딟봖⧭䬫댸盺ㄴ셡蹯ᚉ棋鵅Ｉ컺뒾ꦁ䴠飅末蹉דּ襉㇇졿쪴良鹳䄳皼⚍टﻌ♊芜趨釭⢍뭴䢦尃돪㩇ꁐᯉ뭅⑻鏟ݭ緢㘵蔖䔅Ώ뽿錄鋼툔喉薊㽭蛔㣯쬕쾺簬既툃戵緢昏뫑砙ṽﻭ響ジ韆げ薷⋱蚈቗ꮜ㙚࿮螻ꀸꏎ㕯裈廁붍ﺉ༼↳溋寛탉㨢㹬衲쯘鱘쒵㟠䞩谆㘈╯嶳㔷禟欥ꅺܡ⮏紆꩝䥢嵗陱췇侀烍鶆褷ඕ貒㵯斆谢ꥈ⬼氎Ꚗ⃾뵰니䯚簪ୠ쩡넫㾊렠勇仿ϴ嵔饐桰㲸⠾뻭屮쏀㳻㫣禞쭩藲臨ꃦꔆ鿡뜰㸈䲡⍉龀ﺫ다떏蓂얄촄濁菞꥖뷫䯫덊丫ᡠ㥚ㄓ飹辙❹쥷霶뼹έ䚯匀㵙䝞촽໎亱ᮙ䅨諛轟멱炎逍｡昮䶡˓醳惑쇎㊯⹜錥᩻械홌펋ꬤ볒뤾繟ࣱ䩌⎚百ৢⱄ吳톎鿢䡜訊짓ꔛ䔔麇鏊ꕽ굆밟흘⡤ᴱ瞏뱥㔝蠣及溼閗鿬氝꧀儬뚫鼌㰭폼蛛㼤淈ꡝ⭟曦瞫ಘ蒍鲤ⅎ蹭㵭宍ਔࠗ闺ㆴ렁醑἞륃쀹髊⼄聩뷙㕘⥥㻱꫊슂畕꽜뢾ى闝塉긐훜酪዗籋昊쥬í⼻ᛷड녞౟伟鰌쾣쾤ḇꟻ됫Ꞇ뒻葠닎䢭堲Ⳗൡᩫ鞖㫦ှ神⧋㉪㶫했̡ꅓᾤ᭥༺苼蘐좀嵱⵴壷홮沓稂襥ğꝥ崫苖㵂≰⟤웎᡻ᱰ뢽≋ᴵ镐엧냱ેᓮ祘ᴓ陯ᯗ़濌䆙䡺섯ᮮഷ랋炧ᾲ蓬렚깠羅㝂᯼᥅ｈ튦㕸隫프阸䣺႟ȷ঺𵶵狀톣䀷쵅拁嶿餸⹩䒣畗灳漁㔣㐐蟈꠼ⵑ韑ᇅ뮴側䦬鹶㭁쭔谔 纑ቲ굙㺴賏괐丫칮䏵역헻䜖ᇹ抷৓曇頻⟮螏䈾龃憑蟊벨ꀎ鶍Ჰ≕懖噚䮳疗霥賑놀縈䒑괾ᓄ롡呚酹鎬嚷鰒灠萪諟삧댥땽瓶矻흠뻝㷥剡祕ژ쑵㉛槴㹙꿎ೈ㍷㲰ៜ鍍홞暮ಔ【쵶폶堿ᓚ൨赚䄜詥歔弁魭⹲燭䤋ᮗム㓜槴蛁뿗Ⲿ땺産ㄔ莯鬑慨焇찺쬕⭾뀺甒詈돴ꠧ븍쩶幠篝耟ཡࠜﰌ㷁㿂᫢ᷢ䘂헨Ïའ葅䭪铢⟂揷℺Ἰꕄ쨛鑇뉗珯矀፷㫃탥爢｢ኑ碤醶뎌ﲫ븳䛛퐴徢巡㾂툏槡籅Ęᙃ혩藅馧㢌㚺痬祝㙾휨傏㵧□㒄簮Ꭷ켃㴢搥냑苸섑뜘餯腇쐕喖㏋᧟ᷱ럼┳⌲컓㸥厌ഔ⣖⛋誝櫅炻졮氈黳轃敝꼬䒆镕ﳚ風৐甃迋薿㽊毇샧途똌螱須쾪죾ﬗ툤᧛ﱩ䞵淚麨搌ክⶖ䑙때ᷰ밃ꈶ㡚掞ﯡ兰訖ᕄ糦霪揸䰜特抝힣ᴍ藒育衆Ռ챚痢뛮䯡퇐䌉竜놨쐶䲤獪ᑴ艏⏍堳䰫⚾⥔꡺꒲ﵞ귛娦耚杁淸籹贓耿㋹솻足퉮鰄鯌ꜷ默᳎貂⨷缢㾞듇ᳪꮏᆳﯩ뼜앦虯蒆愖螨㩴ഩ먑舂㓆䟮∋ȃ嫹ན찒ᷨఔ幍꘽ₑ谭ݘ禵䍤㔮帮㫑ꦚ騟哥⽔珣썳㦦᥯氊แ懓澺뉀헸醃良ꉩ壿︖ㆹꪄ꽗鶉扰髬澻匃㵵䰫ሠ꧜知넒䯎塎ɯ裚ɴ௩멛䈬蒂郤꧚觘⸰⑽J侇豧牊儤趆븿⺾鞍鶹翿䕊Ị鳱桵ᵭ৓燵ꀸ臣諍很쳡럠ᠼ㥡뽽㍐ᗑ㸇錿僩湒㴍侗╉螺毰倎㎋儧퍗骆ꆷ솠㺨○﹕℟埩븚뎋ᄹ䨎﯆䈩貾六꿋ਯ⻲⬉䰺똼䯽꿆정ꦯ䰰萇⅀䱱衢뗷캆鋓ᤫਯ렰觿崟䃡ç丌㛚ݨﲠ蒩䃪ꗲ䔔㥴ܛ킆㧰꺜Ŗ縧⣢䁷乩鱏慅ᴠ㝲첳ᩳ䵖ꓛꁮ犩쬄࡙㿭ℙ映ೇ簡跥໒赦ꝧ䡶㰑꾆䂋₌릭⋰䖱忸놭笝罛ݚ趋滾ݹ흕骟䊦ꋒ宺霼闛峘峃䒗涐顶鑈ᦪ⏹ᰧꬕ㍛㟛釪遼࿨谒⇛篂鮮赛汿휪섵緗㹦鸌쑨㜃ѷ鼕꒕銺즗큱ꯜᣘ詂壋陾⛉骷꽴䱹㯫媹뢕켢﬘♝㓯돠㌮ꐏꀇ狳뒥䬣⑌헆Nⵡᱳ뉴෡稞擴䡛폛㎿ꊒ隊쌤歘९忍ᖅⶨਇ㨿厸伪햻뷙꣰刷呋蒓窺驊쵗롒辂帒꺙玎ഫ䛁霖躎৺ቐܯ腝潭ꨲᾈ䒇虳囈裡꽝堂㚟嶉⥰ꪫ鮑얮㡂땲藨⋲䒤빥괛᠝捥伡䣍⸰霠ꕟ⾫ꚓགྷ끣浰輰屣젇ﰹ씬‏ᬗ톱̕钍巡滷᫗똳沰䐧ڂ辫锥업퀩孭외볨㷣爩⥴竀䌴䡸ៈ䇦᜶쇼彤鰎䳂♹샩̖깐≼൙匐⢍ࠈ열Զ襣倁⥆켸ڊ䦴ᕇࢤ﻽ꉲ沗辨આ쬬긠◲᳅䦜⤰麭琼㹅埋鯡勼Ӫ⛿냪寻ꙥ彁㶢┯㡧塋쭠蘚䢭઎㌩෺퀑쒷괦ៃ頽툺䍫֠眇볖᫑괺⦿南츂㡒᥷엣媬몝仂歄ﯡ酬㻝஻贈祘㩯﯐끊嶙趐ꆳਣ놓㸥﷓壿뭰䟪럵좜㗈إ횢쐧稫典뎳⬖鵟ぞ㶶ා赎֐Ⳳ熱쁮㒠➒➸茓ย襠ᣫ紽璐ꉫ枳ﮕ螎ﵣֶ쮔ူ珸歘䎾벥鼈㌅渰腫慴䔦衭娗蛍挏诉汄䗤睪ꌐ漐튩♣哖毈枤뀸䔀췇穁磫䛭ᯛ駾䘉湱̩ꑚᬚ엍㔷ⴄ㿾뻫┾톛첚┽㶸庎䖇淐랛舾뒢ầ뚸䵟‶츺庲⦏蠏퓢㑍㜥ん㊟Α⠬盃ᚐᰨ㾖젧敟ⴽ혮ნ᭶꾍顱䫌鳼뵣頬གྷ거৊괘ʹ搚솂ﵨ슍뽔羕僗述乔蛒㑈챻͋Ᲊ畭䫣࠵䫗鰖쨪ꁥ浩⃒馐ί⯟ᠭ쑑轰ྡ昵ᅄϩ쐘꣠婛᳀庭냁⾌덦蓮ᩛᒋ꺜灢쉻ሷ欿鍆턋檚狝좨ພ蘆獪焣㤎恭׵㖯췃ᔜ䚃籓엑ꉊ栻掂闂⸶㜩豵⥦﮺륗䣐⭒鳣毹黰蘛ງ６Ⓤ璠Ӛ伻ꦱ᳈ꒃ堻Ⴞ뺧瘮鎣ꥩ病ᏼắ徱䢢핝乤럺詠놮鲛큛牢껄줦縢輜▝㈇⦛₝鬚ꑱ쯳ﷴវ൲胏Ꮿ刽奞麀䶅ݫꌄ㾿ᶣﭟｂ쨜飺鑻뻘웵쳆⮾敪刢㼛椪Ჱ쎄鈍᥹೫썗♑ꇅ祲嬅蚵貵椉왡敖丟栁堊碉Ἷ✚嫙늾晑煄䨸婼圹避⮔熡ﲴ淜쑁操ꢫ漻࠳㻹父홢ﶗ꣈亸변▙珇﫩ࠔ狘␥ꌅ엫騿mꥊቊ㝨鈼仿똳ᦼ퐕ꡞꬹឥ嫋懠쿷홭咻䶎⫝쵩쿶瀈鑥ぁⶁ㦑愆遢잶뼜〬鱟훘掝瑅蕠怄܍ᥤ蓽ﺸ뭲鶈뛮績䕿ᅃ粫䨋撘霦⾑低垗娡㶭骈꣹署娍鐯穎扼襫◕洃那㹵ⴿ햹웑䴃릦ꁰ㟕ᦤ﫿۠᮷ﯛﭸ엝騴폭峇⥉ꡔ靖팉஭눱溣様嵨琓㚄퓞녒㟭䁴䑹녖듿젷뜭敓㟍熭唞品煬輴ꑁ傞ㅉﲬ剑垱㏮榲橐欣甬口鲁泙᱃巃ￚ濸簞䒹₧쨋⸢諂ﱙദറ달䝎ﱲ鏫ꓓ큀⧌氘⛼ꟲ堺톐ڥ磨膚뵂판鸋獙捆Ḵ了廛貙ᬆòꃱ쫜懄穗蚧䐈鴠♳踣浛슅॒옉즃⟆长ꁀ꾙㟌ꧭ泥볿ࢻ遏☿咅貚ᦗ斦୛⹦췬袋룫ᐷ薂怄町㗞ꖦ赴ᜪ峇뽥魃礓꣊놝蟥⤗撜㞜뼟㰍멀ꡅ庒ᖴ딃蓻驋鍯蹈譱ꆢ툙晌쐬怔愮造寂瓜᳾䘔淩罌ေব쾛敳鐝軋ꓬ찝㽉淎䲽앟씯불伦垥跭식귞㘘梢祈饋嫣፷䨦׫ꆪ﫾幍쯽볇㴛࢚鬮퇼Ὀ衍듷쾏ꎋ枿煴頙쾿ˌ쫿ꎬ呦愥˲ᑄ씝覒䀋褤㟡欏亚荠腯敧膢痶䷀왳ℴꊋ宕袗矛퉰礱꼀┴梨閮㿜璐ᑩᑴᤐ尹ὅꓰ굘継伔쫭霦嚙蒅歪窳頦Ʋ塼繉๎隚Ⴉࡱ琗텤鲪ꊹ⃶〢蛂恢ㄬ殇斔㛧蔪䐄棇ٓ鳬Ჾ㞣껳ങ䨤럫꣫ሡꡃ뿳曬蚬⤹ꩬ쪮䐃죥ᚈ䵅坙澬챷롋嶹繢ꃺ下䪾꒙⦜⽰㇅홳ꕗ㵑鶟ꛝ쇾ᙂტ驵퓲⏕臰꣚᷈⮴꣦ꮰ⋉雫咯ㄥꌭ뫨鏙④袷㺾▜跨鉇쎈阋䴏ꞯ㌳뎍൑䐿쎖蜯䞼盾╺율ɍᏍ䟮臢舕喞သꧬ鿥쿉職堿๒槴ᎋ犓ᙒꁎᥑ峔噞凵偯׉혓宆ܯ၆䗏즽㬒ﲕ㻊䜾䒺璿珘襃垵쵕턷蔠⾜燅ᱦ磦Ⲁᑁﶸ몶괛ﯗტ髰꾻남쮮锔콺䮗ᠵ△⸘䠱⳿ꮢ籟鉭喈渗䠊鰾✔깬ઘ⢘걺䇼ಏ遂酪គ䈼ٌ㉓섿렰蟕窢눦㴓鳀╈ᆫ傹䭎稁귫筕ᕺ柰톢헾譐狭绑≙﬉ṇ麏둇ผ䂠硒䥌⇇酹騆㨝剔慷䟍齔顶啁錣⥎艡㶋营습몂澤ऒ鿝ꨑࡠ魚财䇓輿覤猾䳩陔㎈ᩨꁱꆋ䀷ńꩪ柔跡骓磻ԧ萼噺楡툿纎繸陌Ⱘ듀鲸橭꾦㮠㇅츔騚䣽펵꺴䩲灗旅侻啡釯⿥櫵ဣ䱊굊䅦軋鹁五暚㟬ꩻ辇㨄鮄投츦奍藠ݪぜ牬句붳熌㸠䡌婆፦阱࿆橵ꙗ숭ؽᆚ鴃忾婣ᵔ鐠뵐靱︺멱⛅胧荊⪒평绞䟨쵌Ⴆ䝩혙䋜ꓯ嵠ꂵᅮ߂燔㦔쑿屩첲氜៾竝臑ꜛ패ﳥ⚠⬓塉䗕堁⌄೟䃜⾫ᳯǈ흔䴹䴆ࣰ쳓ㆹ扏帣≃熢㳗憲➫툷괎ṵ෡嶁䍴Ξᦓ뾸焝氋┱ꉋ儲샇⟝籭霙禂ⵂ⻎嫱뻿◷깷䍦ﰐꜯ띺㑊ጢ䩉漏쳀묝ﴥ빁᳧酶誅ㅡ膢⿤퇦闷뜗땹䀞뮒匶ϊ毰㜊⸥궫잾薯⌐ꯝ佛豍젻Ḳ虢楃浟⋺毓㶍哒툉㏇꒼鐰篪䭰৘㩙搠䋮ԍ⃵പ嚂췵ꤓ⠶嶰؝낫꿙栭篪ᅰ곎䙩㘅樖䬹侂昣ĺ뢒쩜谥ቮ罱熼ꂈﶖ螹苙廿䀇₻瞕쌟㰔༃憿꣓㾋⢵妴躁㗩磠땆࡯承昕쥴맼㜍缀쑅㽉잌핪ᄟ嘧崗Ἣ夹ㄫ迊쬅嘂ứ低紳浞藂യ擕ﻟ偱뀜錅圢돈ഔꥬ׌駀⹇콕ᖲ篜ᄦ㎐窣႟縫࿣帇ﲅ櫗솒诽㘹Ꝥ蒽濙ꀬᇎ곓菚ㅲﶋዶ隷쐟롡峸膫⾼鎏䕢ﳃ겱䡻櫿⻌컿ᴽ攟玸鼹鼝쫉맓祋즬穜蛿⽤䆜뺽Ნ뜦任겸ᾣ悢⺈愅㳢̓剣턪껏忒勨ᆗཽ䪋鿁椮᱅绢뺈㇤͡䭛毬浘楮᫷沀푭纔䙗㜫斥螉珴䜴犑缅ቆ꓆嘧懾埦簗ᩑ槑閡紧᭎⧫谮㋔西ע偋茽컪뎽貂횽㣫咬ﯶ牺擜퇁騎吇꽺ௗ昩ईؖ位럫৊崹嫩∈♼ﱂ覕靄豥塨밓婁뗼턏ᾧ珯䀈ú꘶斳뀄进꿛塽ꪒ櫸὆뎇㝐㴙뽏꜏ᣓ芏鬊쭛쭷쫥췥閅풔秡ꏝ୔㴺刈䶆働ʄ龝ꁑ쮤䟪쪙牐鬞酅疀굌搼듴鄜埻뫜鉵暌䧨藍ɘ㢏衿䷔靋襠醻⊢ഀ혿䒼푐䓜鹸봼䥖襅㎦饭╀ᚧ愁矓搖䫦埽봭ᆾ㯸肠住鹶肯屦챺೮Ꜵ墩嬓뻡ꂾ땦⤱ꬫꧤ螝ꆔ캵ꔹ틟䒻廉ꋬ鯟룵䠾譝ᖑ餘﹂䲙ⴕ癚픤甖饠빸໗ڂ수伖旡䫀蛴럭Ḇ드㈄쾕畸Лꃯ﫤좔剨惙㸴떍쓳力ᣨ嫄ﵟ㨺㯯ᝧ⠰︲鳦쎄錄㕈遫2쒋寖䱁傮䱾虖沥Ꮊ℧뮯ϟ㑠噭鑢㱕혫䘺歴㝹㯮⌒嶢政睼뻎䟞ᜭ퉩⽞㹌ᅆូü㰠㨩땪䘀㎏ට疀钟㑷껏ࡿﬡ腘ꪡ擷쬉蚭㳤앧鲤偍臝镟㠮ꉡ轼ꏳ蝨혨公嵬顼ჿ䫺໘칤聞丅Ḙ⇯㨼䊻Ლ╨썊䃱崙핫⸀饚큌ꢶ㹼鱚菧ꂲ仪䩺훞쥨髰큉懟ᄙᚎ첧㟗熝聝㉪侃涛茟띲首ꛋ鬒㵻匿क㋝敮下헊찾죆瞦೩Ў∙᯵ၓ⵳푐脮⏇埁忐ﳵ἞脩댂鋕ऄ롞ย鄐뒞揩聭听䡒퇢찹㭺ᘤ둰쑽诘ꎕ笥㲣矠覆䋺럱凞員류쩕늴才⭇巄㬕఑輂ﲏມ燗廃᎑힌뭩욵醒뜯횸ᡝ䈬⦉⭰濉웄䫯躜醑㯵見筦쉭䎎릘湋蘐䐦蜉㛪牠‟低ꕩ‴곯暈犨鑴Ῐ㠿鷎䴜퓍嵻ዴ䆛衷觖ﾹᵮ堈邽ớ蘭ⓤ챻ꇇ鉯컘뽸ߘ倠꿅䄠鎟봽쌤辙㳄鉔ꥯ늾옞퉽養劬ᨸ䐛뤲廉栶⎞⧑菏勇僟쓧痧滟쿐疊巨✨㺼縦찔廾嬇ⓘ㺲뫂鹇⪜ᭃ䅿⑰ⅼ왋璠ઘ韝湛不䆹毰䣪⪮쇊ꁄ䤪ཱི扫鋢쫺聁쿗怾吏﮾扦莼綨迫嘯㫼켗镡穛鏔ꠛ௞꓉Ძ흫挫駏웜ꚋ暶窶었됁㏛갠ﾞ⡄ッ㭐㴻랇､版脊䖿톢ﺵ龎䒓䉝诳്旮苠雷籍䩋햳མ苤雾鱛Ⓥ䏾ⱑ㺠䐈°숄溆哲鑎ჩ⮺ﱝ迚尿挋댶쮟鍼闂潾겒筨삊響哦ڇڽ鸃ꔗ횰˂ꪺ炶톝⭋숾裁⧲䄋魕츳휕弻뀜憒﫧ቋᄛᨐ堰힭㎪◷ꕜ𔠛ꃭ謁꠨௿฽ᏺﭧ魁䁡珔睓㩇㰟葿ဗ㩳鰹뚜쮘슯맏垞踏臊♪쀄捔拉菉㢽㩞먁䷣⮾궘㸗燣⼉鷘ㅃ稟鿤ⷱ舱ﳍ늂㐨攏袹鼕様줆ȡ귯Җ꓈㝐ﾛ瀮გ᧜ꉙ䗒裲ࣁ픹ᆐ럾潌ﵘꋹ㢺ꚜ糂処㌥虝ୢ冔꽆ᝌႠ쉦᳠⬊뒐卪絆짢ഃ좹榚쇪ᶄ鈯䕉䲇㱑纔觇਍䋂꫟쐋➰烳榻璕ꋛ榪⹔褓蒡ꌸꀈ櫪尭뙘랐풧蠱턺ۯﶯ쮿ꎀꯣ锾兮듾鼴﹋鞄銨뜚ਗ਼䧽騱ⱝ袉獡穫릦봕昱眳䠉輞⡵햏긒伙仰쾧픥᫥멢薻鈃㜲╦⒇캮럯ݟ쌰䎃稨쳂땏炸䵒뤖櫀혷옦ଧ嘝金ԭ㵏籃砇裂읖⑭珫튎➉躨툭臝烛⎢䓳ﻲ㚢骛翛餞㺵䯯ⳣ儅⢜ᜦೞ靾堼艘␦싞Ს鰷㘴㨇䱒霢椼庒䨖ꪋ⪭ꧺꪏ䵑䙺鐰࿅北ۙ朆ᬊ⿵獰貴覃꾁ᣢዾ䔘⪰摻䴪藂儗焗枇⊿ﲊ効渽嵟ꂲ苝璔냉띜涼궲仐쭰静䐨孖垡鲵旿骋䎉拀蚃ﱖ綴ꦝਉ补ᄞ໪6걙俰귊㈹倅똃컧渚◄欛䂱ꌨ䊝핔䅿폯꘻䆹螚叺ᐣ僀퟊¸鸻巖卫䰎ᅘ㧙毀籵횋꺓擀挢䂗淰꬐䮌닟㖑䵒浖뾭ꇝ渕ꮚ秊ꣽ֜ͼ킯滇鹳娠蜝ⅻ樻㭷䰕뤜│鈤ꀙႡ彍稨﫦ꍯ䎨㩩㼇⤯ᑥꑬ㵈▵贫b餅擗᥸倯蝰൙껌갞ࢄ妖ꦀ귥靶㘈렿瓵莎⼤噷槼醕熆趫㪻乡躚潣豥慠褿괌✑郰듴娙溠ą榻鸢ґ뵨♹麓⥔ᱜ뇟ꉉ⯭퐶桕烋葠શ盟ᓰ◦펵霅耘ਲᗍ䚆肤氘碿쾼貣훮筩곿৞㭰蝕宺ዽ᷊錠⧑ͩឤ띷毯ꆩﹴǞ髋㥴㠧팄粸磵蛵癷⡬숧띴숌脿勄﹬姀条ᒑ岤￟䮯⦍慤€❄䊠껮䐫晕䰍եዞ헖උ呣狗퐌㔕㕆쇡簔둗Ḃ䍴䔠숪꺧⎸퍄ꜥ麿懶鼱畭ෝ颞☈ရ鎱끵꧌㕔詜誧婵卜颁ẁ秘꾶ꛡ綹㮞좓臓沢쒒뮄㺑ኝ頥㼖셯㊙珍绣௜䀂㋮轤녅븜䓤찈曏ᩀ⚦뫣ᇾ㔔蝈딎臜箙㟎࿰昑㨐膹覙㹨␶톊ኋ䪄䟠甗ﻻꦯ蛎ᓐ㹚蓽ﶂ慷셞䬕鋫橘巒牭礡뽗숲笹嶄区卲௹ю럔驟햟洚ꧻҴ并圏῁ᶑ枅⨰㔅넺䫲쬜פֿ⩹齹ᗬ섃䳱뻭杘럁ഉӲṆ왷௬擁녹뢅運༨噹ￛ경亣㒬옽匂䵼포ꍽꛓ᪷⥢Ṣ㰗ᘬ礛Ɱこ↰翮Į鱝麱፹䶍룙ኽចӛ藗狊혬䪜钽⓵ⶳ䱕擭ʾ쌚㏿ᷘ㩂ᕁ赣챣֨ሟ߷絧壕듶ࠂ窛鯆罘丂䷢⋰額閻䣤㐼⻪㩤１碼歠죚퓺桋暂降鶱嬸⚞ῑ틲蕳磈顯尃༴䥮䪊⟥㰌뭦◐㽇𧻓폛턞ⴌ錞฀仗呀휿쳈讔拤꘩ﱼ蘧基鳡찙ᴜ휟Ⓧ懁䴲㸄炆শ僨陊껀歠瘶爃踌Ⲙ㊅ꄜ䆜놤促畚䧥궏䗓먔ꗽ᝼㊃ᒏᏜ퍩몊睕厶ߑ䶘滔ܰ⫡쇥썞袌⻥櫡䘾ࢼᄾ䣿㇒豴慣⿧㨺䒅㔕∂焙龜鏛暞棨ꑜ쬜ᅻ졎ј䡙幒㴗蚾騑獇앓正洛ꢬ럛㬦Ҹ슱଎냏句蜅ᢷ쬖寘⊱㓒귩甎狀ｃ剓1禛釖犷儣챜갫薯覵霛䥪궏핈瀖드엄ꂭ훞Ֆ㭢稄빏Ꭼ穪最䛋ﵙ⡿枪⺰Ḍ帼⤂☆䪚秾쀽擄穉袱俋❽કꨅ퐙쉚捏㵚㭷鿖춊敆묜ꜚ鳏蹕얮鯿昛튳Ԍ⏍濲㧍胡刺ٛ묱奟鏏邟⯭奄┇ㇶ혌ޛᦀ餏㉑ル⃑쭽뢸ﯡ鏇윿羆疍斦鋅鶻稱옻ꋗᖄꩵ펃鈺ᗑ鯲씭ⴌ烜伙瘚醿߼̌쯗骅걖冏茣콭遃Ꮨ핣쿜瀏⓻뵽깼ᮬ맜疬퇞늿圠쯧剷㗚⁑묦虶쯚⭊샳౰얋අ⊵澺휚곎ථ풁㭮存༹Ϣ䰦嚹ẑ顽㞳쯲螵䃼띾鴣엙햟存员椌顠줓૎ﲂ葽랈흀싯丠䮮鹹ꉢ汋檞⁆빲稃ꌥ෿魼漐⎠췌効ꚞ쵖ိ䤴ჴ⓺৊殽⨜俰Ὄ⫞∱熆䭉椆噭䪋檝ﺲ齎퀷繅⮏ᶐ揪㏉⃧앯ᰜ㧬䝐렃櫏⭶语ꐰ㫻踦脩煑옚䴗寧ꂶ旾ꡚވ냺㾶ꢏ謲䁒璎ᷪ骨㾖둡져᝞꠴ⴅꮭ놄鍡⊽쬶铘Ƹ⭳颮྆뒛⯮펳뺂恝ᆲ⏔퐄侤䲁ꌛ癧㷕釚℣ɪ蜏榏紵뙳멛뻪靗뉏엾꯭袗Ě௉⭕ᯅ㟲迄硽蚄볡笠喷ⱇ挣뛕ꢒ덐ꝲ抋璭틟ᖕ둆뤍ᄣ쒑ᙛ⮙Ζ䟮뿮☂捈ﭣढ苽쇫锑㿨ᔷ⊝벥ㅯᕴ귺걩䱢쭯끊㿶瑬枆솠泥鮃姮ᚰ蘭㘉넪륑洓졥軥䯳籷綦眜Ზ礪ꑻ覒霵试괂笳赭ጤ墔⏜菶茶獺祿䤲卭⿲쨼岹섌伏ᯓଵ╀퓷훚壘佝獍腪㫦䄞勉흰疦旄ᾞⰜﵹ螝⋝庤幣⍥ꈗ徘샒ᡜ작̣杷贖⌉뽕郣ꚷ蔡瀚馎꼾卜ᤃ⅏ꕩ劵䐹⑋鱀ꍴ쩺蒠늞蓣貦ꚗᬾ⬎浶᝱恐臢虬ᑒ英뜯돰眍䋜劧鮚᱅忝쑑鹊섔鑶ෑꭅ늰㚢뉺勍늖坷听ദ䁍唆ꕘ䝺⫕즨藑㋻礽긴剳鳬ꭒ⤪Ꮼ諾䊛檸鵧뿸쁙꾼偠붿鳴㖗㋃ؑ績䀮㒄ꦂ郞휺哹䢾駱ꯜᾹ⻉䲈䰫쬛ṋੲ쐈㗙뵟늀㙽䩑뎑봗阃岻⾸Նꧻ벐苋⑤셅녶㬩ꕉⅠ颚ᒜꍈ䚞零摭ࣽ蹲컾ꁮ✈⿉⻄后阃ᕬ풞ݭ펛搣軤엜邌횇릔艹誎犺ꅔ惀導箅镨䡎叴韺笃뭔՚Ἣ鉽䘗偲焖ꋚ请ᰌ沖ⓔ慹➥퍩᷸ѹ㝙‎䴿蠸㻱吘ᵥ퓡尙ܪ럑鴳詑搗䱳਱笶ힹ◁嘡ԏ폪䀮ਏ茏ᤏ臣彜ꭇὩ旕䕙虽໒ 힧巧䲋㞺펚黓钛⤪␶틷㽺篔琢戶垬靅狈䵼傃Ӣ⨐ꋷ譎ꠎ鱾啢浽竾㭍瓢⮔纛光⃁㕎൫隟ꑅ㙥ߦ枰쟾⎉먼ꘖ᭩멍顒洚ꔰ蝯̬纍較뤔奨곍䵅姨䣳㿴瑷虔ᔠꪢ纈装惄懀卲喎懎쓿츁襻禙牸矶⇴暏螬ᇑ몼른䴮쏈ỿ獮紙ⴇ勿ۅ穩❞푭ஙꯈ龗旵羺컺୯칌悮ꇚ烙줨ꡭ᬴ၰ慤叶㠩ᆴ䢽㍏ᐕ쵰ꁹ컹釯䆎둩㖵Њꀩ〤잓쬝싈櫡䜮⎝췑窤ᒼ⺶鎲⡊ﰠ뙡೔௴㗦섷鐀裐ᗣ㐃箨뿒ᷟ㗸큼㑽쇸䩂葆ଁ換풭돶⍚ᡠᷦ䰠ꘪ⤛졜鳪밷琢셖鱩廿幠↲ퟠ貮⁧봱᪮ㅪ骠㔫⥸浰乳惹觨悂卯꾆믧攸〕訶斔菇멁らᇪ뜞௜魄똘ᨭ☙⁋䰢。⣱곣酗Ꝉ栜칸뽵릥퐟膎⤇ࠣ탵㬙믁緺㊙ᅈ쩢Ⰲ竭὿⢷鎉䉄跮ॕ▻ᾬ툊톲ꖾ㢀ꓙ豍롨䊩쉓蕆鼓힧櫲훫ԴሄӪ抠ぴ٫镟⢂븬܀壇ꊗꙵ쪖徜発뤃嚻奆츽⨲둺ߡ꣸凼䉜뚆ş卍烚郼ꢨ艾⯛䷸鰺㵦돰殯貝额䫼挄㰬埯省漏ﾼ諿賤鵼螀᭛ﺦꮮ∔ⷶ䆉꛸ಂ╋㌛鏬ꡪ斩䅾졾쵬藬쨚䩻䪢칬䄨䗹乞橼椦쩶㕘Ŷ௞떽樚邮皈㐱鶩䁏䔾궑緮淍ڜ͑擇䍿⨪껪櫢ꌑ庂뱐〨埾량ꔴ䂔ꄭ粇跼픠䨙♛Ꙋ㤇驻썑Ἂ甿齏ﶃ쨋ﰩ㇤浉㓘㤋⍍떴ݩ潛茂营䒃䧎詡碻쀕뾙둚厼了]湾츹呪꣞많왰쬐銪먄鸞킎㹴髖ﵛ孜샐츔됁黄횢剬섐䧎豬찪㷷ƺል网い첓趰殏븖䱈ꃵ瘾́⇏쥿낟儀೎ꜭ疛꤃뿁ꊼ낥ഔ쓔⧟«⭻琼鑏뤳儐ளᒒ䂴⏹挞봑噊覯䳉䁛⫎鑤⻅勁㊣郺瀨권귤殠蚴졗䶽㔉凙㚆댛⿂뵸쮒痺뱭ദ릘ꫵ礓賂緭䏬噓蛮ݓ엿㠿蟤ࠬ▽뽈㼄⢊쟳嫻ᷙ꘠蔘̹苾ꖇꗺ๧譿揥杗㖿䅨騂禫웶뉉ﬗ￯⿼쿹堷ෆᑦա䳜嚲큞៨뼈䓚냩֙Ỏ鷺襦寲᳈邶餙跀蝕豵䝸⿴㺆ᚿ䌶ᘽ㖻㲍ꦈ鞀꒭젖嚆熉஡睚৊탋繓ꯨ힅垇Ⅴ䅉ꌿ〩艞䰡맔쇱፩ᖼ؅疹Ʈᐮ࿿풃꿓鬨녵津셎侬虜陓猪琀牑쏜釼佩슰亁힛ᩬᒐ힤龅䞊拡뱘蟑햵俉핟䣏ꕱ牫ꀞ໳撲ಆ媋媼셊낺⥇Ủ℞숗촂뾳ꆚ왢ﾋ⤌ඝౘ瑌汴Ӈ粂縁ບ칄᛺⾦୮幟銄蠆휾⩓萐۸䑇仞ꘐ䔀脨ᣒ㘫ᢍ釷Ꮞ뒢젘褷ዏ휞쨾ズ핼阐诶撬㨓ꮃ㿪펽퉂衒鶜ꏜ︘컯쬆렲넺谛沣㽳硨﷊⏭쫲ⵎ뻃쵑榟蹄ｌ봞鑍䜫ⲥ㳔ൽ稛幗䯘ㅀ㧆娜멝혟⠺ꇮ충츴蚲锝ᅖ䷂왣ꠁ晟ꖌ㔺觩潽Ĝⲿꑽப탄蚡퀄祍鬎봃攁닣誣䃽୚Ꭳꂴ榄梙匡迿褤ᵌ䴐鹮썺⒦璲䓩趽焞渲╻찢Ｚ쿿㊡磄踂㈏혧﵌씂ꨛ⡫韅祵㇕㆓屌뒡⯈ࠬ쐐豩巈䇋Ȣ㯃ퟲ첃⿁䫜உ槂㫳臌章┃Ř趧㌋髬앂纤㡴캮䬺䩒￉팻갬樼詥뚗籙迎照⫠㢇靊쾳侈果珱忈㲿袁炨챖⋤ﳶ틹덷릟ﰫ㲙汾ﻩ⺂밹䊉㌕梊뭌ᝂ῵᧝❱牵鈕ｷ䳉狇쉤謪笮쉊ᐰ嵽계₭鷘妱嗋됲뇡蠿࢘粏臆恧织洝褊ၗ펖⯂噙천縍穀틲酎쒽㙘禖鶷犃焮娤扡ᰦ㻸텂䁲栠뷞쯬㣽漎鏟Ꭼ؛儓趟嬺鋹ﱒߧ嶩칻扡ﭶ㰏툨⤗ꌫ킰봌ⴢޓʴ䅇꨷躗딙췙編䙒覎ۥ奓봵믵驂执㞰睟豌䂹槪舢饯ቊ栩Ꞑ瘵⏒鞢᥹㮻⛅ᯛ뾾ျ䢉〹퓉氙뺣纰҃긂ᾯẖ⚭剑࡮閾ꚤadge-${evt.label?.includes('person') ? 'blue' : 'amber'}`}>
+-                      {evt.label || evt.class || 'Unknown'}
+-                    </span>
+-                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+-                      {evt.recorder_id || 'ΓÇö'}
+-                    </span>
+-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', flex: 1 }}>
+-                      {evt.confidence ? `${Math.round(evt.confidence * 100)}%` : 'ΓÇö'}
+-                    </span>
+-                    <span className={`badge ${evt.verified ? 'badge-green' : 'badge-red'}`}>
++      <div className="panel-body-scroll" style={{ padding: 0, flex: 1, overflowY: 'auto' }}>
++        {loading ? (
++          <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
++            {Array.from({length: 5}).map((_, i) => <div key={i} className="skeleton-line" style={{ height: '40px' }} />)}
++          </div>
++        ) : error ? (
++          <div className="error-state" style={{ margin: '20px' }}>
++            <div>Failed to load: {error}</div>
++            <button className="btn btn-secondary" onClick={fetchEvents}>Retry</button>
++          </div>
++        ) : filteredEvents.length === 0 ? (
++          <div className="empty-state">No events matched your filters</div>
++        ) : (
++          filteredEvents.map((evt) => {
++            const isExpanded = expandedId === evt.id
++            const color = evt.label === 'person' ? 'blue' : evt.label === 'vehicle' ? 'amber' : 'red'
++            
++            return (
++              <div key={evt.id} style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-base)' }}>
++                {/* Collapsed Row */}
++                <div 
++                  onClick={() => setExpandedId(isExpanded ? null : evt.id)}
++                  style={{ 
++                    display: 'flex', gap: '12px', padding: '10px 16px', 
++                    alignItems: 'center', cursor: 'pointer',
++                    background: isExpanded ? 'var(--bg-elevated)' : 'transparent',
++                    transition: 'background 150ms ease'
++                  }}
++                >
++                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', width: '140px', flexShrink: 0 }}>
++                    {evt.timestamp ? new Date(evt.timestamp).toLocaleString() : 'just now'}
++                  </div>
++                  <div style={{ width: '100px', flexShrink: 0 }}>
++                    <span className={`badge badge-${color}`} style={{textTransform:'capitalize'}}>{evt.label || 'Unknown'}</span>
++                  </div>
++                  <div style={{ flex: 1, fontSize: '12px', color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
++                    {evt.recorder_id || 'Unknown recorder'}
++                  </div>
++                  <div style={{ width: '80px', fontSize: '12px', color: 'var(--text-secondary)' }}>
++                    {Math.round((evt.confidence||0)*100)}%
++                  </div>
++                  <div style={{ width: '100px', flexShrink: 0 }}>
++                    <span className={`badge ${evt.verified ? 'badge-green' : 'badge-red'}`} style={{fontSize: '10px'}}>
+                       {evt.verified ? 'Γ£ô Verified' : 'Unverified'}
+                     </span>
+-                    <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{isExpanded ? 'Γû▓' : 'Γû╝'}</span>
+                   </div>
+-                  {isExpanded && (
+-                    <div style={{ padding: '10px 14px 14px', background: 'var(--bg-elevated)' }}>
+-                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+-                        {evt.snapshot_url && (
+-                          <img
+-                            src={evt.snapshot_url}
+-                            alt="snapshot"
+-                            style={{ width: 140, height: 90, objectFit: 'cover', borderRadius: 5, border: '1px solid var(--border)' }}
+-                          />
+-                        )}
+-                        <div style={{ flex: 1, fontSize: 12, color: 'var(--text-secondary)' }}>
+-                          <div><strong>ID:</strong> {evt.id || 'ΓÇö'}</div>
+-                          <div><strong>Recorder:</strong> {evt.recorder_id || 'ΓÇö'}</div>
+-                          <div><strong>Location:</strong> {evt.location || 'ΓÇö'}</div>
+-                          <div><strong>Confidence:</strong> {evt.confidence ? `${Math.round(evt.confidence*100)}%` : 'ΓÇö'}</div>
+-                          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+-                            <button className="btn btn-success btn-xs">Γ£ô Verify</button>
+-                            <button className="btn btn-danger btn-xs">ΓÜæ Flag</button>
+-                          </div>
+-                        </div>
+-                      </div>
+-                    </div>
+-                  )}
+                 </div>
+-              )
+-            })
+-          )}
+-        </div>
+-      </div>
+ 
+-      {/* RIGHT: Summary Stats */}
+-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+-        <div className="panel">
+-          <div className="panel-header">Summary Stats</div>
+-          <div className="panel-body">
+-            <div className="sub-panel" style={{ marginBottom: 10 }}>
+-              <div className="sub-panel-title">Today by Type</div>
+-              {stats ? Object.entries(stats).map(([type, count]) => (
+-                <div key={type} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+-                  <span style={{ fontSize: 12, color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{type}</span>
+-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+-                    <div style={{
+-                      width: Math.min(60, Math.round((count / Math.max(...Object.values(stats))) * 60)),
+-                      height: 6, borderRadius: 3,
+-                      background: 'var(--accent-blue)', opacity: 0.7,
+-                    }} />
+-                    <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'JetBrains Mono, monospace' }}>{count}</span>
++                {/* Expanded Row */}
++                <div style={{ 
++                  maxHeight: isExpanded ? '200px' : '0px', 
++                  overflow: 'hidden', 
++                  transition: 'max-height 300ms ease',
++                  background: 'var(--bg-elevated)' 
++                }}>
++                  <div style={{ padding: '16px', display: 'flex', gap: '16px', borderTop: '1px solid var(--border)' }}>
++                    <div style={{ width: '120px', height: '90px', background: '#000', borderRadius: '4px', overflow: 'hidden', flexShrink: 0 }}>
++                      <img 
++                        src={`http://localhost:8000/api/snapshot/${evt.id}`} 
++                        key={evt.id}
++                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
++                        onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.style.background = 'var(--border)' }}
++                      />
++                    </div>
++                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '6px' }}>
++                      <div style={{ fontSize: '13px', fontWeight: 600 }}>Location Details</div>
++                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{evt.location || 'Location not tagged'}</div>
++                      <div style={{ marginTop: 'auto', display: 'flex', gap: '8px' }}>
++                        {!evt.verified && <button className="btn btn-sm btn-success">Verify</button>}
++                        <button className="btn btn-sm btn-danger">Flag Issue</button>
++                      </div>
++                    </div>
+                   </div>
+                 </div>
+-              )) : (
+-                <div className="skeleton" style={{ height: 60 }} />
+-              )}
+-            </div>
+-
+-            <div className="sub-panel" style={{ marginBottom: 10 }}>
+-              <div className="sub-panel-title">Unverified</div>
+-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+-                <span style={{
+-                  fontSize: 28, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace',
+-                  color: unverifiedCount > 0 ? 'var(--accent-red)' : 'var(--accent-green)',
+-                }}>
+-                  {loading ? 'ΓÇª' : unverifiedCount}
+-                </span>
+-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>pending</span>
+               </div>
+-            </div>
+-
+-            <div className="sub-panel">
+-              <div className="sub-panel-title">Total Today</div>
+-              <span style={{
+-                fontSize: 28, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace',
+-                color: 'var(--text-primary)',
+-              }}>
+-                {loading ? 'ΓÇª' : (events?.length || 0)}
+-              </span>
+-            </div>
+-          </div>
+-        </div>
++            )
++          })
++        )}
+       </div>
+     </div>
+   )
+diff --git a/frontend/src/components/GalleryPage.jsx b/frontend/src/components/GalleryPage.jsx
+index 8d54401..f81e728 100644
+--- a/frontend/src/components/GalleryPage.jsx
++++ b/frontend/src/components/GalleryPage.jsx
+@@ -1,162 +1,135 @@
+ import { useState, useEffect } from 'react'
+-
+ import { authFetch } from '../utils/api'
+-const API = 'http://localhost:8000'
+-
+-function SkeletonCard() {
+-  return (
+-    <div className="panel" style={{ overflow: 'hidden' }}>
+-      <div className="skeleton" style={{ aspectRatio: '16/9', borderRadius: 0 }} />
+-      <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+-        <div className="skeleton" style={{ height: 10, width: '60%' }} />
+-        <div className="skeleton" style={{ height: 9, width: '40%' }} />
+-      </div>
+-    </div>
+-  )
+-}
+ 
+ export default function GalleryPage() {
+-  const [snapshots, setSnapshots] = useState(null)
+-  const [loading, setLoading]     = useState(true)
+-  const [error, setError]         = useState(null)
+-  const [selected, setSelected]   = useState(null)
+-  const [dateFilter, setDateFilter] = useState('')
+-  const [typeFilter, setTypeFilter] = useState('all')
++  const [items, setItems] = useState([])
++  const [loading, setLoading] = useState(true)
++  const [error, setError] = useState(null)
++  const [filter, setFilter] = useState('All')
++  const [lightbox, setLightbox] = useState(null)
+ 
+-  function fetchSnapshots() {
++  useEffect(() => {
+     setLoading(true)
+-    authFetch(`/api/snapshots`)
+-      .then(r => r ? r.json() : Promise.reject('No response'))
+-      .then(d => {
+-        const list = Array.isArray(d) ? d : (d.snapshots || [])
+-        setSnapshots(list)
+-        setLoading(false)
++    authFetch('/api/gallery')
++      .then(r => r ? r.json() : [])
++      .then(data => {
++        const arr = Array.isArray(data) ? data : (data?.items || data?.detections || [])
++        setItems(arr)
+       })
+-      .catch(e => { setError(String(e)); setLoading(false) })
+-  }
++      .catch(e => setError(e.message))
++      .finally(() => setLoading(false))
++  }, [])
+ 
+-  useEffect(() => { fetchSnapshots() }, []) // eslint-disable-line
++  const filteredItems = items.filter(item => {
++    if (filter === 'All') return true
++    const label = (item.label || 'unknown').toLowerCase()
++    return label === filter.toLowerCase()
++  })
+ 
+-  const filtered = (snapshots || []).filter(s =>
+-    (typeFilter === 'all' || (s.label || '').includes(typeFilter))
+-  )
++  // Lightbox view
++  if (lightbox) {
++    return (
++      <div style={{ position: 'absolute', inset: 0, minHeight: '400px', background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }} onClick={() => setLightbox(null)}>
++        <div style={{ maxWidth: '800px', width: '90%', background: 'var(--bg-card)', borderRadius: '8px', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
++          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
++            <span style={{ fontWeight: 600 }}>Snapshot Details</span>
++            <button className="btn btn-ghost btn-xs" onClick={() => setLightbox(null)}>Γ£ò</button>
++          </div>
++          <div style={{ background: '#000', display: 'flex', justifyContent: 'center' }}>
++            <img 
++              src={`http://localhost:8000/api/gallery/image/${lightbox.filename}`} 
++              style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain' }}
++              onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.innerHTML = '<div style="padding: 40px; color: var(--text-muted)">Image not available</div>' }}
++            />
++          </div>
++          <div style={{ padding: '16px', display: 'flex', flexWrap: 'wrap', gap: '16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
++            <div><strong>Time:</strong> {lightbox.timestamp ? new Date(lightbox.timestamp).toLocaleString() : 'Unknown'}</div>
++            <div><strong>Recorder:</strong> {lightbox.recorder_id || 'Unknown'}</div>
++            <div><strong>Location:</strong> {lightbox.location || 'Unknown'}</div>
++            <div><strong>Confidence:</strong> {lightbox.confidence ? Math.round(lightbox.confidence * 100) + '%' : 'Unknown'}</div>
++            <div style={{ marginLeft: 'auto' }}>
++              <span className={`badge badge-${lightbox.label === 'person' ? 'blue' : lightbox.label === 'vehicle' ? 'amber' : 'red'}`} style={{ textTransform: 'capitalize' }}>
++                {lightbox.label || 'Unknown'}
++              </span>
++            </div>
++          </div>
++        </div>
++      </div>
++    )
++  }
+ 
+   return (
+-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+-      {/* Filter bar */}
+-      <div style={{
+-        display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center',
+-        padding: '8px 12px', background: 'var(--bg-card)', border: '1px solid var(--border)',
+-        borderRadius: 8,
+-      }}>
+-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase' }}>Filter:</span>
+-        {['all', 'person', 'vehicle', 'drone'].map(t => (
+-          <button
+-            key={t}
+-            className={`filter-pill ${typeFilter === t ? 'active' : ''}`}
+-            onClick={() => setTypeFilter(t)}
++    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
++      {/* Filter Bar */}
++      <div style={{ display: 'flex', gap: '8px' }}>
++        {['All', 'Person', 'Vehicle', 'Unknown'].map(f => (
++          <button 
++            key={f}
++            className={`filter-pill ${filter === f ? 'active' : ''}`}
++            onClick={() => setFilter(f)}
+           >
+-            {t.charAt(0).toUpperCase() + t.slice(1)}
++            {f}
+           </button>
+         ))}
+-        <input
+-          type="date"
+-          className="input"
+-          style={{ height: 30, width: 150, fontSize: 12 }}
+-          value={dateFilter}
+-          onChange={e => setDateFilter(e.target.value)}
+-        />
+-        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+-          {loading ? 'LoadingΓÇª' : `${filtered.length} snapshots`}
+-        </span>
+       </div>
+ 
+-      {/* Grid */}
+       {loading ? (
+-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
+-          {[1,2,3,4,5,6,7,8].map(i => <SkeletonCard key={i} />)}
++        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px' }}>
++          {Array.from({length: 8}).map((_, i) => (
++            <div key={i} className="skeleton" style={{ height: '140px', borderRadius: '8px' }} />
++          ))}
+         </div>
+       ) : error ? (
+-        <div className="error-state">
+-          <div style={{ fontSize: 13, color: 'var(--accent-red)', fontWeight: 600 }}>Failed to load</div>
+-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{error}</div>
+-          <button className="btn btn-secondary btn-sm" onClick={fetchSnapshots}>Γå║ Retry</button>
+-        </div>
+-      ) : filtered.length === 0 ? (
+-        <div className="empty-state">
+-          <div className="empty-state-icon">≡ƒû╝∩╕Å</div>
+-          <div className="empty-state-title">No snapshots yet</div>
+-          <div className="empty-state-sub">Snapshots are captured automatically when detections occur</div>
+-        </div>
++        <div className="error-state">Failed to load: {error}</div>
++      ) : filteredItems.length === 0 ? (
++        <div className="empty-state">No snapshots found</div>
+       ) : (
+-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
+-          {filtered.map((snap, i) => (
+-            <div
+-              key={snap.id || i}
+-              className="panel"
+-              style={{ cursor: 'pointer', transition: 'transform 150ms, border-color 150ms' }}
+-              onClick={() => setSelected(snap)}
+-              onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-blue)'; e.currentTarget.style.transform = 'translateY(-2px)' }}
+-              onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.transform = '' }}
+-            >
+-              <div style={{ aspectRatio: '16/9', overflow: 'hidden', background: '#000' }}>
+-                <img
+-                  src={snap.snapshot_url || snap.url}
+-                  alt={snap.label || 'snapshot'}
+-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+-                  onError={e => { e.target.style.display = 'none' }}
+-                />
+-              </div>
+-              <div style={{ padding: '8px 10px' }}>
+-                <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 3 }}>
+-                  <span className={`badge badge-${(snap.label || '').includes('person') ? 'blue' : 'amber'}`} style={{ fontSize: 9 }}>
+-                    {snap.label || snap.class || 'Unknown'}
+-                  </span>
++        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px' }}>
++          {filteredItems.map(item => {
++            const color = item.label === 'person' ? 'blue' : item.label === 'vehicle' ? 'amber' : 'red'
++            return (
++              <div 
++                key={item.id}
++                onClick={() => setLightbox(item)}
++                style={{
++                  borderRadius: '8px', overflow: 'hidden', cursor: 'pointer',
++                  border: '1px solid var(--border)',
++                  transition: 'transform 150ms, border-color 150ms',
++                  display: 'flex', flexDirection: 'column'
++                }}
++                onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.02)'; e.currentTarget.style.borderColor = 'var(--accent-blue)' }}
++                onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.borderColor = 'var(--border)' }}
++              >
++                <div style={{ aspectRatio: '16/9', background: 'var(--bg-elevated)', position: 'relative' }}>
++                  <img 
++                    src={`http://localhost:8000/api/gallery/image/${item.filename}`} 
++                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
++                    onError={(e) => { 
++                      e.target.style.display = 'none'; 
++                      e.target.nextSibling.style.display = 'flex';
++                    }}
++                  />
++                  {/* Fallback placeholder */}
++                  <div style={{ position: 'absolute', inset: 0, display: 'none', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '11px', textTransform: 'uppercase' }}>
++                    {item.label || 'Snapshot'}
++                  </div>
+                 </div>
+-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+-                  {snap.timestamp ? new Date(snap.timestamp).toLocaleString() : 'ΓÇö'}
++                <div style={{ padding: '8px 10px', background: 'var(--bg-elevated)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
++                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
++                    <span className={`badge badge-${color}`} style={{ fontSize: '9px', textTransform: 'capitalize' }}>
++                      {item.label || 'Unknown'}
++                    </span>
++                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
++                      {item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
++                    </span>
++                  </div>
++                  <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
++                    {item.recorder_id || 'Unknown recorder'}
++                  </div>
+                 </div>
+-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{snap.recorder_id || 'ΓÇö'}</div>
+-              </div>
+-            </div>
+-          ))}
+-        </div>
+-      )}
+-
+-      {/* Modal */}
+-      {selected && (
+-        <div
+-          style={{
+-            position: 'fixed', inset: 0, zIndex: 1000,
+-            background: 'rgba(0,0,0,0.85)',
+-            display: 'flex', alignItems: 'center', justifyContent: 'center',
+-          }}
+-          onClick={() => setSelected(null)}
+-        >
+-          <div
+-            style={{
+-              background: 'var(--bg-card)', border: '1px solid var(--border)',
+-              borderRadius: 10, overflow: 'hidden', maxWidth: 780, width: '90%',
+-            }}
+-            onClick={e => e.stopPropagation()}
+-          >
+-            <div style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)' }}>
+-              <div style={{ fontSize: 13, fontWeight: 600 }}>
+-                {selected.label || 'Snapshot'} ΓÇö {selected.recorder_id || ''}
+               </div>
+-              <button className="btn btn-ghost btn-xs" onClick={() => setSelected(null)}>Γ£ò</button>
+-            </div>
+-            <img
+-              src={selected.snapshot_url || selected.url}
+-              alt="full snapshot"
+-              style={{ width: '100%', maxHeight: 480, objectFit: 'contain', background: '#000' }}
+-            />
+-            <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)', display: 'flex', gap: 16 }}>
+-              <span>Time: {selected.timestamp ? new Date(selected.timestamp).toLocaleString() : 'ΓÇö'}</span>
+-              <span>Confidence: {selected.confidence ? `${Math.round(selected.confidence * 100)}%` : 'ΓÇö'}</span>
+-              <span>Location: {selected.location || 'ΓÇö'}</span>
+-            </div>
+-          </div>
++            )
++          })}
+         </div>
+       )}
+     </div>
+diff --git a/frontend/src/components/LiveFeedsPage.jsx b/frontend/src/components/LiveFeedsPage.jsx
+index 7251528..3c965b0 100644
+--- a/frontend/src/components/LiveFeedsPage.jsx
++++ b/frontend/src/components/LiveFeedsPage.jsx
+@@ -1,28 +1,44 @@
+ import { useState, useEffect, useRef } from 'react'
+-import { authFetch, authWS } from '../utils/api'
++import { authFetch, authWS, getToken } from '../utils/api'
++import { Maximize2, Bell, Radio, Video, Download, Camera } from 'lucide-react'
+ 
+-function LiveFeedsPage() {
++// Using the requirements from prompt
++export default function LiveFeedsPage() {
+   const [recorders, setRecorders] = useState([])
+-  const [selectedId, setSelectedId] = useState('CAM-01')
++  const [selectedId, setSelectedId] = useState(null)
+   const [loading, setLoading] = useState(true)
++  const [streamError, setStreamError] = useState(false)
+   const [nightVision, setNightVision] = useState(false)
+   const [detections, setDetections] = useState([])
+-  const [streamError, setStreamError] = useState(false)
++  const [liveBoxes, setLiveBoxes] = useState([])
++  
+   const wsRef = useRef(null)
+-  const token = localStorage.getItem('token')
++  const boxTimerRef = useRef(null)
+ 
++  // Fetch recorders on mount
+   useEffect(() => {
+-    authFetch('/api/recorders')
+-    .then(r => r ? r.json() : [])
+-    .then(data => {
+-      const list = Array.isArray(data) ? data : []
+-      setRecorders(list)
+-      if (list.length > 0) setSelectedId(list[0].id || 'CAM-01')
+-      setLoading(false)
+-    })
+-    .catch(() => setLoading(false))
+-  }, [])
++    authFetch('/api/users?role=recorder')
++      .then(r => r?.json())
++      .then(data => {
++        const list = Array.isArray(data) ? data : []
++        setRecorders(list)
++        if (list.length > 0 && !selectedId) {
++          setSelectedId(list[0].username || list[0].id)
++        }
++        setLoading(false)
++      })
++      .catch(() => setLoading(false))
++
++    // Fetch initial detections
++    authFetch('/api/detections?limit=5')
++      .then(r => r?.json())
++      .then(data => {
++        const arr = Array.isArray(data) ? data : (data?.items || data?.detections || [])
++        setDetections(arr.slice(0, 5))
++      }).catch(()=>{})
++  }, []) // eslint-disable-line
+ 
++  // WebSocket for detections and boxes
+   useEffect(() => {
+     const ws = authWS('/ws/detections')
+     ws.onmessage = (e) => {
+@@ -30,129 +46,267 @@ function LiveFeedsPage() {
+         const msg = JSON.parse(e.data)
+         if (msg.type === 'detection') {
+           setDetections(prev => [msg.data, ...prev].slice(0, 5))
++          if (msg.data.boxes) {
++            setLiveBoxes(msg.data.boxes)
++            clearTimeout(boxTimerRef.current)
++            boxTimerRef.current = setTimeout(() => setLiveBoxes([]), 4000)
++          }
+         }
+-      } catch {}
++      } catch (err) {}
+     }
+     wsRef.current = ws
+-    return () => ws.close()
++    return () => {
++      ws.close()
++      clearTimeout(boxTimerRef.current)
++    }
+   }, [])
+ 
+-  const streamUrl = `http://localhost:8000/api/stream/${selectedId}?token=${token}`
++  const selectedRecorder = recorders.find(r => (r.username || r.id) === selectedId) || null
++  const isOnline = selectedRecorder?.status === 'online'
+ 
+-  const toggleNV = async () => {
+-    const next = !nightVision
+-    setNightVision(next)
+-    await authFetch(`/api/recorders/${selectedId}/night_vision`, {
+-      method: 'POST',
+-      body: JSON.stringify({ enabled: next })
+-    }).catch(()=>{})
++  async function toggleNightVision() {
++    const newVal = !nightVision
++    setNightVision(newVal)
++    if (selectedId) {
++      await authFetch(`/api/recorders/${selectedId}/night_vision`, {
++        method: 'POST',
++        body: JSON.stringify({ enabled: newVal })
++      }).catch(()=>{})
++    }
++  }
++
++  const broadcastBroadcast = () => {
++    const msg = window.prompt("Enter broadcast message:")
++    if (msg) {
++      // Implement broadcast
++      authFetch('/api/alerts', { method: 'POST', body: JSON.stringify({ type: 'broadcast', message: msg }) }).catch(()=>{})
++    }
+   }
+ 
+   return (
+-    <div style={{display:'flex',flexDirection:'column',gap:16}}>
+-      <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+-        <div className="stat-chip">
+-          <span style={{width:8,height:8,borderRadius:'50%',background:'#3fb950',display:'inline-block'}}/>
+-          <span className="value">LIVE</span>
+-        </div>
+-        <div className="stat-chip">Stream: <span className="value">{selectedId}</span></div>
+-        <div className="stat-chip" style={{cursor:'pointer'}} onClick={toggleNV}>
+-          Night Vision: <span className="value" style={{color:nightVision?'#388bfd':undefined}}>
+-            {nightVision ? 'ON' : 'OFF'}
+-          </span>
+-        </div>
++    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
++      
++      {/* ROW 1: STATS STRIP */}
++      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
++        {loading ? (
++          Array.from({length:5}).map((_,i)=><div key={i} className="skeleton" style={{width: 100, height: 28, borderRadius: 14}}/>)
++        ) : (
++          <>
++            <div className="stat-chip" style={{display:'flex', alignItems:'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 12px', borderRadius: '14px', fontSize: '12px', border: '1px solid var(--border)'}}>
++              <span className={`status-dot ${isOnline ? 'online' : 'offline'}`} />
++              <span style={{fontWeight: 600, color: isOnline ? 'var(--accent-green)' : 'var(--text-muted)'}}>{isOnline ? 'LIVE' : 'OFFLINE'}</span>
++            </div>
++            <div className="stat-chip" style={{display:'flex', alignItems:'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 12px', borderRadius: '14px', fontSize: '12px', border: '1px solid var(--border)'}}>
++              FPS: {selectedRecorder?.fps || '--'}
++            </div>
++            <div className="stat-chip" style={{display:'flex', alignItems:'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 12px', borderRadius: '14px', fontSize: '12px', border: '1px solid var(--border)'}}>
++              WiFi: {selectedRecorder?.wifi_strength || '--'} dBm
++            </div>
++            <div className="stat-chip" style={{display:'flex', alignItems:'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 12px', borderRadius: '14px', fontSize: '12px', border: '1px solid var(--border)'}}>
++              Battery: {selectedRecorder?.battery || '--'}%
++            </div>
++            <div className="stat-chip" onClick={toggleNightVision} style={{display:'flex', alignItems:'center', gap: '6px', background: 'var(--bg-elevated)', padding: '4px 12px', borderRadius: '14px', fontSize: '12px', border: nightVision ? '1px solid var(--accent-blue)' : '1px solid var(--border)', cursor: 'pointer'}}>
++              Night Vision: <span style={{color: nightVision ? 'var(--accent-blue)' : 'inherit'}}>{nightVision ? 'ON' : 'OFF'}</span>
++            </div>
++          </>
++        )}
+       </div>
+ 
+-      <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',gap:16}}>
++      {/* ROW 2: SPLIT PANEL */}
++      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '16px' }}>
++        
++        {/* LEFT PANEL */}
+         <div className="panel">
+           <div className="panel-header">
+-            <span style={{display:'flex',alignItems:'center',gap:8}}>
+-              <span className="live-dot"/>Primary Feed ΓÇö {selectedId}
+-            </span>
++            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
++              <span className={`status-dot ${isOnline ? 'online' : 'error'}`} />
++              {selectedRecorder?.display_name || selectedId || 'No recorder'}
++              <span className={`badge ${isOnline ? 'badge-green' : 'badge-red'}`} style={{marginLeft:'8px'}}>{isOnline ? 'ONLINE' : 'OFFLINE'}</span>
++            </div>
++            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
++              <button className="btn btn-sm btn-secondary" onClick={toggleNightVision}>NV {nightVision ? 'ON' : 'OFF'}</button>
++              <button className="btn btn-sm btn-ghost" style={{padding: '4px'}}><Maximize2 size={14}/></button>
++            </div>
+           </div>
+-          <div>
+-            <div className="video-container" style={{aspectRatio:'16/9'}}>
+-              {!streamError ? (
++          
++          <div className="panel-body" style={{ padding: 0, position: 'relative' }}>
++            <div className="video-container" style={{ aspectRatio: '16/9', position: 'relative', background: 'black', overflow: 'hidden' }}>
++              {isOnline && !streamError ? (
+                 <img
+                   key={selectedId}
+-                  src={streamUrl}
++                  src={`http://localhost:8000/stream/${selectedId}?token=${getToken()}`}
+                   style={{
+-                    width:'100%',height:'100%',objectFit:'cover',display:'block',
+-                    filter: nightVision ? 'brightness(0.35) hue-rotate(115deg) saturate(3)' : 'none',
+-                    transition:'filter 0.3s'
++                    width:'100%', height:'100%', objectFit:'cover', display:'block',
++                    filter: nightVision ? 'brightness(0.35) hue-rotate(115deg) saturate(3) contrast(1.2)' : 'none',
++                    transition: 'filter 0.4s ease'
+                   }}
+                   onError={() => setStreamError(true)}
+                 />
+               ) : (
+-                <div className="video-offline">
+-                  <div style={{fontSize:32}}>≡ƒô╖</div>
++                <div className="video-offline" style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
++                  <Camera size={32} style={{ opacity: 0.5, marginBottom: '8px' }} />
+                   <span>Stream unavailable</span>
+-                  <button onClick={() => setStreamError(false)}
+-                    style={{marginTop:8,padding:'4px 12px',background:'var(--bg-elevated)',
+-                    border:'1px solid var(--border)',borderRadius:6,
+-                    color:'var(--text-primary)',cursor:'pointer',fontSize:12}}>
+-                    Retry
+-                  </button>
++                  <button className="btn btn-secondary btn-sm" style={{marginTop:'12px'}} onClick={() => setStreamError(false)}>Retry</button>
+                 </div>
+               )}
+-            </div>
+-            <div style={{padding:12}}>
+-              <div className="sub-panel">
+-                <div style={{fontSize:10,fontWeight:600,color:'var(--text-muted)',
+-                  textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>
+-                  Recent Detections
+-                </div>
+-                {detections.length === 0 ? (
+-                  <div style={{color:'var(--text-muted)',fontSize:12,textAlign:'center',padding:'8px 0'}}>
+-                    No detections yet
+-                  </div>
+-                ) : detections.map((d,i) => (
+-                  <div key={i} style={{display:'flex',alignItems:'center',gap:8,
+-                    padding:'5px 0',borderBottom:'1px solid var(--border)',fontSize:12}}>
+-                    <span style={{width:8,height:8,borderRadius:'50%',flexShrink:0,
+-                      background:d.label==='person'?'#388bfd':d.label==='vehicle'?'#d29922':'#f85149'}}/>
+-                    <span>{d.label}</span>
+-                    <span style={{color:'var(--text-muted)',fontSize:11}}>{Math.round((d.confidence||0)*100)}%</span>
+-                    <span style={{color:'var(--text-muted)',fontSize:10,marginLeft:'auto'}}>
+-                      {d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : 'just now'}
++
++              {/* BOUNDING BOXES */}
++              {liveBoxes.map((box, i) => {
++                const color = box.label === 'person' ? '#388bfd' : box.label === 'vehicle' ? '#d29922' : '#f85149'
++                return (
++                  <div key={i} style={{
++                    position: 'absolute',
++                    left: box.x * 100 + '%',
++                    top: box.y * 100 + '%',
++                    width: box.w * 100 + '%',
++                    height: box.h * 100 + '%',
++                    border: `2px solid ${color}`,
++                    borderRadius: '3px', boxSizing: 'border-box',
++                    pointerEvents: 'none'
++                  }}>
++                    <span style={{
++                      position: 'absolute', top: '-18px', left: '-2px',
++                      background: color, color: 'white', fontSize: '9px', fontWeight: 700,
++                      padding: '1px 4px', borderRadius: '2px', whiteSpace: 'nowrap'
++                    }}>
++                      {box.label} {Math.round((box.confidence||0)*100)}%
+                     </span>
+                   </div>
+-                ))}
++                )
++              })}
++
++              {/* OVERLAY */}
++              <div className="video-overlay" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', padding: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
++                <div style={{ color: 'white', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
++                  <div style={{ fontSize: '12px', fontWeight: 600 }}>{selectedRecorder?.location || 'Unknown Location'}</div>
++                  <div style={{ fontSize: '10px', opacity: 0.8 }}>{selectedRecorder?.username || selectedId}</div>
++                </div>
++                {selectedRecorder?.fps && (
++                  <div style={{ color: '#00ff00', fontFamily: 'monospace', fontSize: '12px', textShadow: '0 1px 2px rgba(0,0,0,0.8)', background: 'rgba(0,0,0,0.4)', padding: '2px 6px', borderRadius: '4px' }}>
++                    {selectedRecorder.fps} FPS
++                  </div>
++                )}
+               </div>
+             </div>
++            
++            <div className="sub-panel" style={{ margin: '12px' }}>
++              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
++                <span className="sub-panel-title" style={{ margin: 0 }}>Recent Detections</span>
++                <span className="badge badge-muted">{detections.length}</span>
++              </div>
++              
++              {loading && detections.length === 0 ? (
++                Array.from({length:3}).map((_,i) => <div key={i} className="skeleton-line" style={{marginBottom: '8px'}} />)
++              ) : detections.length === 0 ? (
++                <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', padding: '16px 0' }}>No detections yet</div>
++              ) : (
++                detections.map((d, i) => {
++                  const color = d.label === 'person' ? '#388bfd' : d.label === 'vehicle' ? '#d29922' : '#f85149'
++                  return (
++                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 0', borderBottom: i < detections.length - 1 ? '1px solid var(--border)' : 'none' }}>
++                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: color }} />
++                      <span style={{ fontSize: '12px', textTransform: 'capitalize' }}>{d.label}</span>
++                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{Math.round((d.confidence||0)*100)}%</span>
++                      <span style={{ marginLeft: 'auto', fontSize: '10px', color: 'var(--text-muted)' }}>
++                        {d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : 'just now'}
++                      </span>
++                      <button className="btn btn-xs btn-secondary" style={{ marginLeft: '8px' }}>Verify</button>
++                    </div>
++                  )
++                })
++              )}
++            </div>
+           </div>
+         </div>
+ 
++        {/* RIGHT PANEL - Recorders */}
+         <div className="panel">
+           <div className="panel-header">
+             Recorders <span className="badge badge-blue">{recorders.length}</span>
+           </div>
+-          <div className="panel-body">
++          <div className="panel-body-scroll" style={{ maxHeight: 'fit-content' }}>
+             {loading ? (
+-              <><div className="skeleton" style={{height:60,marginBottom:8}}/><div className="skeleton" style={{height:60}}/></>
++              Array.from({length: 4}).map((_, i) => <div key={i} className="skeleton" style={{ height: 60, marginBottom: '8px' }} />)
+             ) : recorders.length === 0 ? (
+-              <div style={{color:'var(--text-muted)',fontSize:12,textAlign:'center',padding:'16px 0'}}>
+-                No recorders found
+-              </div>
+-            ) : recorders.map(rec => (
+-              <div key={rec.id}
+-                className={`recorder-card ${selectedId===rec.id?'selected':''}`}
+-                onClick={() => { setSelectedId(rec.id); setStreamError(false) }}>
+-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+-                  <strong style={{fontSize:12}}>{rec.display_name||rec.id}</strong>
+-                  <span className={`badge ${rec.status==='online'?'badge-green':'badge-red'}`}>
+-                    {rec.status||'online'}
+-                  </span>
+-                </div>
+-                <div style={{fontSize:11,color:'var(--text-muted)',marginTop:3}}>
+-                  {rec.location||'No location'}
++              <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', padding: '24px 0' }}>No recorders assigned</div>
++            ) : (
++              recorders.map(rec => {
++                const id = rec.username || rec.id
++                const online = rec.status === 'online'
++                return (
++                  <div key={id} onClick={() => { setSelectedId(id); setStreamError(false) }} 
++                       style={{ padding: '10px', borderRadius: '6px', border: `1px solid ${selectedId === id ? 'var(--accent-blue)' : 'var(--border)'}`, background: selectedId === id ? 'rgba(56,139,253,0.05)' : 'var(--bg-elevated)', marginBottom: '8px', cursor: 'pointer' }}>
++                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
++                      <span style={{ fontSize: '12px', fontWeight: 600, color: selectedId === id ? 'var(--accent-blue)' : 'var(--text-primary)' }}>{rec.display_name || id}</span>
++                      <span className={`badge ${online ? 'badge-green' : 'badge-red'}`} style={{ fontSize: '9px' }}>{online ? 'ONLINE' : 'OFFLINE'}</span>
++                    </div>
++                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{rec.location || 'Unknown location'}</div>
++                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px', fontSize: '10px', color: 'var(--text-secondary)' }}>
++                      <span>≡ƒöï {rec.battery || '--'}%</span>
++                      <span>≡ƒô╢ {rec.wifi_strength || '--'}dBm</span>
++                    </div>
++                  </div>
++                )
++              })
++            )}
++          </div>
++        </div>
++      </div>
++
++      {/* ROW 3: ALL FEEDS & QUICK ACTIONS */}
++      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
++        
++        {/* All Feeds */}
++        <div className="panel">
++          <div className="panel-header">All Feeds <span className="badge badge-muted">{recorders.length}</span></div>
++          <div className="panel-body" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '8px' }}>
++            {recorders.map(rec => {
++              const id = rec.username || rec.id
++              const online = rec.status === 'online'
++              return (
++                <div key={id} onClick={() => setSelectedId(id)} style={{ border: `1px solid ${selectedId === id ? 'var(--accent-blue)' : 'var(--border)'}`, borderRadius: '6px', overflow: 'hidden', cursor: 'pointer' }}>
++                  <div style={{ aspectRatio: '16/9', background: 'black', position: 'relative' }}>
++                    {online ? (
++                      <img src={`http://localhost:8000/stream/${id}?token=${getToken()}`} style={{width:'100%', height:'100%', objectFit:'cover'}} onError={(e) => {e.target.style.display='none'; e.target.nextSibling.style.display='flex'}} />
++                    ) : null}
++                    <div style={{ display: online ? 'none' : 'flex', position: 'absolute', inset: 0, alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
++                      <Camera size={16} />
++                    </div>
++                  </div>
++                  <div style={{ padding: '5px 8px', background: 'var(--bg-elevated)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
++                    <span style={{ fontSize: '11px', fontWeight: 600 }}>{rec.display_name || id}</span>
++                    <span className={`status-dot ${online ? 'online' : 'error'}`} />
++                  </div>
+                 </div>
+-              </div>
+-            ))}
++              )
++            })}
++          </div>
++        </div>
++
++        {/* Quick Actions */}
++        <div className="panel">
++          <div className="panel-header">Quick Actions</div>
++          <div className="panel-body" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', alignContent: 'start' }}>
++            <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', padding: '16px', gap: '8px', height: 'auto' }} onClick={() => authFetch('/api/alerts', {method:'POST', body:JSON.stringify({type:'broadcast', message:'Alert from monitor'})})}>
++              <Bell size={20} color="var(--accent-red)" />
++              <span>Alert All</span>
++            </button>
++            <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', padding: '16px', gap: '8px', height: 'auto' }} onClick={broadcastBroadcast}>
++              <Radio size={20} color="var(--accent-blue)" />
++              <span>Broadcast</span>
++            </button>
++            <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', padding: '16px', gap: '8px', height: 'auto' }} onClick={() => authFetch('/api/recording/start_all', {method:'POST'})}>
++              <Video size={20} color="var(--accent-green)" />
++              <span>Record All</span>
++            </button>
++            <button className="btn btn-secondary" style={{ display: 'flex', flexDirection: 'column', padding: '16px', gap: '8px', height: 'auto' }} onClick={() => window.location.href = `http://localhost:8000/api/detections/export?token=${getToken()}`}>
++              <Download size={20} color="var(--text-primary)" />
++              <span>Export Events</span>
++            </button>
+           </div>
+         </div>
+       </div>
++      
+     </div>
+   )
+ }
+-export default LiveFeedsPage
+diff --git a/frontend/src/components/SentryPortalPage.jsx b/frontend/src/components/SentryPortalPage.jsx
+index c490ace..c5922d3 100644
+--- a/frontend/src/components/SentryPortalPage.jsx
++++ b/frontend/src/components/SentryPortalPage.jsx
+@@ -1,4 +1,4 @@
+-import { useState, useEffect } from 'react'
++import { useState, useEffect, useRef } from 'react'
+ 
+ import { authFetch } from '../utils/api'
+ const API = 'http://localhost:8000'
+@@ -38,6 +38,7 @@ export default function SentryPortalPage() {
+   const [autoRecord, setAutoRecord] = useState(false)
+   const [sending, setSending]       = useState(false)
+   const [testResult, setTestResult] = useState(null)
++  const servoTimerRef                = useRef(null)
+ 
+   useEffect(() => {
+     authFetch(`/api/recorders`)
+@@ -52,13 +53,14 @@ export default function SentryPortalPage() {
+ 
+   async function sendServo(p, t) {
+     setSending(true)
+-    try {
+-      await authFetch(`/api/servo/move`, {
++    clearTimeout(servoTimerRef.current)
++    servoTimerRef.current = setTimeout(() => {
++      authFetch('/api/sensors/servo', {
+         method: 'POST',
+         body: JSON.stringify({ pan: p, tilt: t, recorder_id: selRec }),
+-      })
+-    } catch {}
+-    setSending(false)
++      }).catch(()=>{})
++      setSending(false)
++    }, 300)
+   }
+ 
+   async function runServoTest() {
+diff --git a/frontend/src/components/Sidebar.jsx b/frontend/src/components/Sidebar.jsx
+index b75eb79..7fa4c56 100644
+--- a/frontend/src/components/Sidebar.jsx
++++ b/frontend/src/components/Sidebar.jsx
+@@ -4,19 +4,18 @@ import {
+   Monitor, List, AlertTriangle, Radio, Map, BarChart2,
+   Activity, Image, FileText, Settings, Cpu, LogOut
+ } from 'lucide-react'
++import { authFetch, getUser } from '../utils/api'
+ 
+-const API = 'http://localhost:8000'
+-
+-const NAV_ITEMS = [
++const MONITOR_ITEMS = [
+   { id: 'live-feeds',   label: 'Live Feeds',   icon: Monitor },
+-  { id: 'event-log',   label: 'Event Log',   icon: List },
+-  { id: 'verify-queue', label: 'Verify Queue', icon: AlertTriangle, badge: 'verify', badgeColor: 'red' },
+-  { id: 'field-comms', label: 'Field Comms',  icon: Radio, badge: 'comms', badgeColor: 'blue' },
+-  { id: 'gps-map',     label: 'GPS Map',      icon: Map },
+-  { id: 'analytics',   label: 'Analytics',    icon: BarChart2 },
+-  { id: 'heatmap',     label: 'Heatmap',      icon: Activity },
+-  { id: 'gallery',     label: 'Gallery',      icon: Image },
+-  { id: 'reports',     label: 'Reports',      icon: FileText },
++  { id: 'event-log',    label: 'Event Log',    icon: List },
++  { id: 'verify-queue', label: 'Verify Queue', icon: AlertTriangle, badge: 'verify' },
++  { id: 'field-comms',  label: 'Field Comms',  icon: Radio,         badge: 'comms' },
++  { id: 'gps-map',      label: 'GPS Map',      icon: Map },
++  { id: 'analytics',    label: 'Analytics',    icon: BarChart2 },
++  { id: 'heatmap',      label: 'Heatmap',      icon: Activity },
++  { id: 'gallery',      label: 'Gallery',      icon: Image },
++  { id: 'reports',      label: 'Reports',      icon: FileText },
+ ]
+ 
+ const SYSTEM_ITEMS = [
+@@ -24,281 +23,266 @@ const SYSTEM_ITEMS = [
+   { id: 'system-status', label: 'System Status', icon: Cpu },
+ ]
+ 
+-function NavItem({ item, active, badgeCount, badgeColor, onClick }) {
++function NavItem({ item, active, count, onClick }) {
+   const [hovered, setHovered] = useState(false)
+   const Icon = item.icon
+-  const isActive = active
++  
++  const itemStyle = {
++    display: 'flex', alignItems: 'center', gap: '10px',
++    padding: '7px 12px', margin: '1px 8px',
++    borderRadius: '6px', cursor: 'pointer',
++    fontSize: '12.5px', fontWeight: active ? 500 : 400,
++    color: active ? '#388bfd' : (hovered ? 'var(--text-primary)' : 'var(--text-secondary)'),
++    position: 'relative', userSelect: 'none',
++    transition: 'all 150ms cubic-bezier(0.4, 0, 0.2, 1)',
++    background: active ? 'rgba(56,139,253,0.10)' : (hovered ? 'var(--bg-elevated)' : 'transparent'),
++    transform: (!active && hovered) ? 'translateX(2px)' : 'none'
++  }
++
++  const iconStyle = {
++    color: active ? '#388bfd' : 'inherit',
++    opacity: (active || hovered) ? 1 : 0.6,
++    transition: 'opacity 150ms ease'
++  }
++
+   return (
+-    <div
+-      className={`nav-item ${isActive ? 'active' : ''}`}
+-      onClick={onClick}
+-      onMouseEnter={() => setHovered(true)}
+-      onMouseLeave={() => setHovered(false)}
+-      title={item.label}
+-    >
+-      <Icon
+-        size={15}
+-        style={{
+-          opacity: isActive ? 1 : hovered ? 1 : 0.65,
+-          color: isActive ? 'var(--accent-blue)' : 'inherit',
+-          flexShrink: 0,
+-        }}
+-      />
+-      <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+-        {item.label}
+-      </span>
+-      {badgeCount > 0 && (
++    <div style={itemStyle} onClick={onClick} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
++      <Icon size={15} style={iconStyle} />
++      <span style={{flex: 1}}>{item.label}</span>
++      {active && (
++        <span style={{
++          position: 'absolute', left: 0, top: '20%', height: '60%',
++          width: '2.5px', background: '#388bfd',
++          borderRadius: '0 2px 2px 0',
++          animation: 'slideInBar 200ms cubic-bezier(0.4, 0, 0.2, 1)'
++        }} />
++      )}
++      {item.badge && count > 0 && (
+         <span style={{
+           marginLeft: 'auto',
+-          fontSize: 10,
+-          fontWeight: 700,
+-          fontFamily: 'JetBrains Mono, monospace',
+-          minWidth: 18,
+-          height: 18,
+-          display: 'flex',
+-          alignItems: 'center',
+-          justifyContent: 'center',
+-          borderRadius: 9,
+-          padding: '0 5px',
+-          background: badgeColor === 'red' ? 'var(--accent-red)' : 'var(--accent-blue)',
+-          color: '#fff',
+-          flexShrink: 0,
++          fontSize: '10px', fontWeight: 700, fontFamily: 'monospace',
++          minWidth: '18px', height: '18px', borderRadius: '9px', padding: '0 5px',
++          display: 'flex', alignItems: 'center', justifyContent: 'center',
++          background: item.badge === 'verify' ? 'var(--accent-red)' : 'var(--accent-blue)',
++          color: 'white',
++          animation: 'badgePop 300ms ease'
+         }}>
+-          {badgeCount > 99 ? '99+' : badgeCount}
++          {count > 99 ? '99+' : count}
+         </span>
+       )}
+     </div>
+   )
+ }
+ 
+-export default function Sidebar({ view, setView, badges = {}, onLogout }) {
++export default function Sidebar({ view, setView }) {
+   const navigate = useNavigate()
+-  const [userHover, setUserHover] = useState(false)
+-  const [userInfo, setUserInfo]   = useState(null)
++  const [isCollapsed, setIsCollapsed] = useState(false)
+   const [verifyCount, setVerifyCount] = useState(0)
+-  const [commsCount, setCommsCount]   = useState(0)
++  const [commsCount, setCommsCount] = useState(0)
++  const [userHovered, setUserHovered] = useState(false)
++  
++  const user = getUser() || {}
++  const name = user.display_name || user.username || 'Operator'
++  const initials = (name.substring(0,2) || 'OP').toUpperCase()
+ 
+-  const role        = sessionStorage.getItem('hs_role')         || 'monitor'
+-  const displayName = sessionStorage.getItem('hs_display_name') || 'Operator'
+-
+-  // Fetch user info
+-  useEffect(() => {
+-    const token = sessionStorage.getItem('hs_token')
+-    if (!token) return
+-    fetch(`${API}/api/auth/me`, {
+-      headers: { Authorization: `Bearer ${token}` },
+-      credentials: 'include',
+-    })
+-      .then(r => r.ok ? r.json() : null)
+-      .then(d => { if (d) setUserInfo(d) })
+-      .catch(() => {})
+-  }, [])
++  const fetchBadges = () => {
++    authFetch('/api/verify-queue')
++      .then(r => r?.json())
++      .then(data => {
++        if (!data) return
++        const arr = Array.isArray(data) ? data : (data?.items || data?.data || [])
++        setVerifyCount(arr.length)
++      }).catch(()=>{})
++    
++    authFetch('/api/comms/messages')
++      .then(r => r?.json())
++      .then(data => {
++        if (!data) return
++        const arr = Array.isArray(data) ? data : (data?.items || data?.data || [])
++        setCommsCount(arr.filter(m => !m.acknowledged).length)
++      }).catch(()=>{})
++  }
+ 
+-  // Fetch badge counts on mount
+   useEffect(() => {
+-    const token = sessionStorage.getItem('hs_token')
+-    const hdrs  = token ? { Authorization: `Bearer ${token}` } : {}
+-    Promise.all([
+-      fetch(`${API}/api/detections/verify-queue`, { headers: hdrs, credentials: 'include' })
+-        .then(r => r.ok ? r.json() : []).catch(() => []),
+-      fetch(`${API}/api/comms/messages?unacked=true&limit=50`, { headers: hdrs, credentials: 'include' })
+-        .then(r => r.ok ? r.json() : []).catch(() => []),
+-    ]).then(([vq, msgs]) => {
+-      setVerifyCount(Array.isArray(vq)   ? vq.length   : (vq?.count   || 0))
+-      setCommsCount( Array.isArray(msgs) ? msgs.length  : (msgs?.count || 0))
+-    })
++    fetchBadges()
++    const t = setInterval(fetchBadges, 30000)
++    return () => clearInterval(t)
+   }, [])
+ 
+-  // Sync with parent badges prop
+-  useEffect(() => {
+-    if (badges.verify !== undefined) setVerifyCount(badges.verify)
+-    if (badges.comms  !== undefined) setCommsCount(badges.comms)
+-  }, [badges])
+-
+-  const name     = userInfo?.display_name || displayName
+-  const userRole = userInfo?.role         || role
+-  const initials = name
+-    .split(' ')

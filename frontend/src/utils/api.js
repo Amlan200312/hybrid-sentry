@@ -40,6 +40,8 @@ export const authFetch = async (endpoint, options = {}) => {
       // Unauthorized, clear token and redirect to login
       localStorage.removeItem('token')
       localStorage.removeItem('user')
+      sessionStorage.removeItem('token')
+      sessionStorage.removeItem('user')
       if (window.location.pathname !== '/login') {
         window.location.href = '/login'
       }
@@ -56,5 +58,53 @@ export const authFetch = async (endpoint, options = {}) => {
 export const authWS = (endpoint) => {
   const token = getToken()
   const tokenQuery = token ? `?token=${token}` : ''
-  return new WebSocket(`${WS}${endpoint}${tokenQuery}`)
+  const url = `${WS}${endpoint}${tokenQuery}`
+
+  let ws = null
+  let reconnectAttempts = 0
+  const maxReconnectAttempts = 5
+  const baseDelay = 1000
+  // User-supplied handlers stored here so we can re-attach after reconnect
+  let _onmessage = null
+  let _onerror = null
+  let _onopen = null
+  let _onclose = null
+
+  const connect = () => {
+    ws = new WebSocket(url)
+    ws.onopen = (ev) => {
+      console.log(`[WS] Connected to ${endpoint}`)
+      reconnectAttempts = 0
+      _onopen?.(ev)
+    }
+    ws.onmessage = (ev) => _onmessage?.(ev)
+    ws.onerror = (ev) => { console.error(`[WS] Error ${endpoint}:`, ev); _onerror?.(ev) }
+    ws.onclose = (ev) => {
+      console.log(`[WS] Closed ${endpoint}, code=${ev.code}`)
+      _onclose?.(ev)
+      if (reconnectAttempts < maxReconnectAttempts) {
+        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttempts), 30000)
+        reconnectAttempts++
+        console.warn(`[WS] Reconnecting ${endpoint} in ${delay}ms (attempt ${reconnectAttempts})`)
+        setTimeout(connect, delay)
+      }
+    }
+  }
+
+  connect()
+
+  // Return a proxy that stores handler assignments and forwards to current ws
+  return {
+    get readyState() { return ws?.readyState ?? WebSocket.CLOSED },
+    set onmessage(fn) { _onmessage = fn; if (ws) ws.onmessage = (ev) => fn(ev) },
+    get onmessage() { return _onmessage },
+    set onerror(fn) { _onerror = fn },
+    get onerror() { return _onerror },
+    set onopen(fn) { _onopen = fn },
+    get onopen() { return _onopen },
+    set onclose(fn) { _onclose = fn },
+    get onclose() { return _onclose },
+    send(data) { if (ws?.readyState === WebSocket.OPEN) ws.send(data) },
+    close() { reconnectAttempts = maxReconnectAttempts; ws?.close() },
+  }
 }

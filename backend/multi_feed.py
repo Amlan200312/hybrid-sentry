@@ -80,6 +80,7 @@ class CameraState:
 
         # Processing mode (shown on UI)
         self.processing_mode: str = "PERIODIC"   # FULL SCAN | ROI ACTIVE | PERIODIC
+        self.mode: str = "auto"
 
         # Recording state
         self.is_recording = False
@@ -211,6 +212,9 @@ class MultiFeedManager:
         if isinstance(source, int) or isinstance(source, str):
             cap = cv2.VideoCapture(source)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+            cap.set(cv2.CAP_PROP_FPS, 10)
             width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
             height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
             print(f"[CAM] {state.camera_id} resolution: {int(width)}x{int(height)}")
@@ -218,9 +222,12 @@ class MultiFeedManager:
         else:
             cap = None
 
-        target_fps = 30
+        target_fps = 10
         frame_interval = 1.0 / target_fps
         last_log_time = time.time()
+        frame_counter = 0
+        consecutive_failures = 0
+        MAX_FAILURES = 30  # ~3 seconds at 10 FPS before attempting reopen
 
         while not state._stop_event.is_set():
             t_start = time.time()
@@ -230,8 +237,28 @@ class MultiFeedManager:
                 ret, frame = cap.read()
                 if not ret:
                     frame = None
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+            else:
+                consecutive_failures += 1
 
-            # Every 100 frames, print a dot to show it's alive
+            # Attempt camera reconnect after too many failures
+            if consecutive_failures >= MAX_FAILURES:
+                print(f"[CAM] {state.camera_id} — too many failures, reopening camera...")
+                if cap:
+                    cap.release()
+                cap = cv2.VideoCapture(source)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+                cap.set(cv2.CAP_PROP_FPS, 10)
+                state.cap = cap
+                consecutive_failures = 0
+                time.sleep(1.0)
+                continue
+
+            # Every 5s print alive log
             if time.time() - last_log_time > 5:
                 print(f"[CAM] Capturing frames... {state.camera_id}")
                 last_log_time = time.time()
@@ -240,11 +267,10 @@ class MultiFeedManager:
                 # Camera offline — push offline frame
                 state.is_online = False
                 state._heartbeat_miss += 1
-                # Generate offline placeholder
                 offline_frame = self._make_offline_frame(state)
                 self._encode_and_store(state, offline_frame)
-                time.sleep(0.5)
-                # Attempt reconnect
+                time.sleep(0.2)
+                # Attempt soft reopen (not same as full reconnect above)
                 if cap and not cap.isOpened():
                     cap.open(source)
                 continue
@@ -281,11 +307,13 @@ class MultiFeedManager:
             cv2.putText(processed, mode_text, (8, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (57, 255, 20), 1, cv2.LINE_AA)
 
-            # Push raw frame for motion thread
-            try:
-                state.motion_queue.put_nowait((frame.copy(), motion_rects))
-            except queue.Full:
-                pass
+            # Push raw frame for motion thread (only every 2nd frame to reduce YOLO load)
+            frame_counter += 1
+            if frame_counter % 2 == 0:
+                try:
+                    state.motion_queue.put_nowait((frame.copy(), motion_rects))
+                except queue.Full:
+                    pass
 
             # MJPEG encode (quality=70)
             self._encode_and_store(state, processed)
@@ -327,24 +355,31 @@ class MultiFeedManager:
             now = time.time()
 
             # YOLO strategy decision
-            if motion_count == 0:
-                # Periodic: run full scan every 10 seconds
+            if state.mode == 'full_scan':
+                self._enqueue_for_yolo(state, frame, motion_rects, 'full')
+                state.processing_mode = "FULL SCAN"
+            elif state.mode == 'roi_only' and motion_rects:
+                self._enqueue_for_yolo(state, frame, motion_rects, 'roi')
+                state.processing_mode = "ROI ACTIVE"
+            elif state.mode == 'full_periodic':
                 state.processing_mode = "PERIODIC"
                 if now - last_yolo_time >= self.YOLO_PERIODIC_INTERVAL:
-                    self._enqueue_for_yolo(state, frame, motion_rects, "full")
+                    self._enqueue_for_yolo(state, frame, motion_rects, 'full')
                     last_yolo_time = now
-
-            elif motion_count == 1:
-                # 1 motion region → ROI only (5x faster)
-                state.processing_mode = "ROI ACTIVE"
-                self._enqueue_for_yolo(state, frame, motion_rects, "roi")
-                last_yolo_time = now
-
-            else:
-                # 2+ motion regions → Full frame scan
-                state.processing_mode = "FULL SCAN"
-                self._enqueue_for_yolo(state, frame, motion_rects, "full")
-                last_yolo_time = now
+            else:  # auto mode
+                if motion_count == 0:
+                    state.processing_mode = "PERIODIC"
+                    if now - last_yolo_time >= self.YOLO_PERIODIC_INTERVAL:
+                        self._enqueue_for_yolo(state, frame, motion_rects, 'full')
+                        last_yolo_time = now
+                elif motion_count == 1:
+                    state.processing_mode = "ROI ACTIVE"
+                    self._enqueue_for_yolo(state, frame, motion_rects, 'roi')
+                    last_yolo_time = now
+                else:
+                    state.processing_mode = "FULL SCAN"
+                    self._enqueue_for_yolo(state, frame, motion_rects, 'full')
+                    last_yolo_time = now
 
     def _enqueue_for_yolo(
         self,
@@ -441,30 +476,51 @@ class MultiFeedManager:
         """
         Yields MJPEG frames for a camera.
         FastAPI StreamingResponse compatible generator.
+        If no new frame arrives within 5 s, yields an offline placeholder
+        so the HTTP response never hangs.
         """
         state = self._cameras.get(camera_id)
         if not state:
             return
 
+        TIMEOUT = 5.0   # seconds before yielding a placeholder
+
         last_yield = time.time()
+        last_jpeg_sent = None   # track to avoid flooding identical frames
+
         while True:
             with state._jpeg_lock:
                 jpeg = state.latest_jpeg
 
-            if jpeg:
+            now = time.time()
+
+            if jpeg and jpeg is not last_jpeg_sent:
+                last_jpeg_sent = jpeg
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"
                     + jpeg
                     + b"\r\n"
                 )
-                # Throttle to 15 fps
-                elapsed = time.time() - last_yield
+                elapsed = now - last_yield
                 if elapsed < 1/15:
                     time.sleep(1/15 - elapsed)
                 last_yield = time.time()
+            elif now - last_yield > TIMEOUT:
+                # Generate a placeholder to avoid the client hanging
+                placeholder = self._make_offline_frame(state)
+                ret, buf = cv2.imencode(".jpg", placeholder, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                if ret:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + buf.tobytes()
+                        + b"\r\n"
+                    )
+                last_yield = time.time()
             else:
-                time.sleep(0.05)  # wait a bit if no frame yet
+                time.sleep(0.04)   # ~25 Hz poll
+
 
     # ─── Offline Frame Generator ─────────────────────────────
     def _make_offline_frame(self, state: CameraState) -> np.ndarray:

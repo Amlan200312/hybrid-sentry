@@ -51,6 +51,8 @@ class SystemStats:
             "wifi_dbm": 0,
             "ip_address": "",
             "uptime_seconds": 0,
+            "weather_code": 0,
+            "outside_temp_c": 0.0,
         }
 
     def start(self):
@@ -64,6 +66,7 @@ class SystemStats:
     def _loop(self):
         net_prev = None
         net_time_prev = None
+        weather_time_prev = 0
 
         while not self._stop.is_set():
             t0 = time.time()
@@ -173,6 +176,23 @@ class SystemStats:
             except Exception:
                 stats["wifi_ssid"] = ""
                 stats["wifi_dbm"] = 0
+
+            # Weather (every 5 minutes = 300s)
+            if t_curr - weather_time_prev > 300:
+                try:
+                    import urllib.request, json
+                    # Example coordinates (could be configured to deployer's location)
+                    lat, lon = 51.5074, -0.1278 
+                    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+                    with urllib.request.urlopen(url) as response:
+                        data = json.loads(response.read())
+                        cw = data.get("current_weather", {})
+                        if cw:
+                            stats["outside_temp_c"] = cw.get("temperature", 0.0)
+                            stats["weather_code"] = cw.get("weathercode", 0)
+                    weather_time_prev = t_curr
+                except Exception:
+                    pass
 
             with self._lock:
                 self._stats.update(stats)

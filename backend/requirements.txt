@@ -30,9 +30,6 @@ reportlab==4.2.0
 # ── System Stats ──────────────────────────────────────────────
 psutil==5.9.8
 
-# ── Speech Recognition (VOSK) ────────────────────────────────
-vosk==0.3.45
-
 # ── Raspberry Pi GPIO (RPi only) ─────────────────────────────
 # Uncomment on Raspberry Pi:
 # RPi.GPIO==0.7.1

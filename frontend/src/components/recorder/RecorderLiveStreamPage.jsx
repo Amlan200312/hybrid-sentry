@@ -21,22 +21,43 @@ export default function RecorderLiveStreamPage({ isMobile }) {
       .catch(() => {})
 
     try {
+      if (wsRef.current && wsRef.current.readyState <= 1) return
       wsRef.current = authWS('/ws/detections')
       wsRef.current.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
-          if (msg.type === 'detection' && msg.detection) {
-            const det = msg.detection
-            setDetections(prev => [det, ...(prev || [])].slice(0, 20))
+          console.log('[WS /ws/detections] received:', msg)
+          // Backend sends { type:'detection', data:{...} } OR { type:'detection', detection:{...} }
+          const det = msg.detection || msg.data
+          if (msg.type === 'detection' && det) {
+            const label = det.label || det.display_label || det.detected_class || 'Unknown'
+            const entry = {
+              id: det.id,
+              label,
+              confidence: det.confidence ?? 0,
+              camera_id: det.camera_id,
+              timestamp: det.timestamp,
+              x: det.x ?? 0,
+              y: det.y ?? 0,
+              width: det.width ?? det.w ?? 0,
+              height: det.height ?? det.h ?? 0,
+            }
+            setDetections(prev => [entry, ...(prev || [])].slice(0, 20))
             setLiveBoxes(prev => [
               ...prev,
-              { ...det, _id: det.id || (Date.now() + Math.random()), _time: Date.now() }
+              { ...entry, _id: (det.id || Date.now()) + Math.random(), _time: Date.now() }
             ])
           }
-        } catch {}
+        } catch (e) { console.error('[WS] parse error', e) }
       }
     } catch {}
     return () => wsRef.current?.close()
+  }, [])
+
+  // Health-ping every 25s to keep the auth token alive on server side
+  useEffect(() => {
+    const id = setInterval(() => authFetch('/api/health').catch(() => {}), 25000)
+    return () => clearInterval(id)
   }, [])
 
   useEffect(() => {
@@ -115,9 +136,9 @@ export default function RecorderLiveStreamPage({ isMobile }) {
                   width: '100%', height: '100%', objectFit: 'contain',
                   transition: 'filter 0.3s ease'
                 }}
-                onError={() => {
-                  console.warn("Stream image error, retrying...");
-                  setStreamKey(prev => prev + 1);
+              onError={() => {
+                  console.warn('Stream image error — reloading in 2s')
+                  setTimeout(() => setStreamKey(prev => prev + 1), 2000)
                 }}
               />
             ) : (

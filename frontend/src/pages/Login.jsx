@@ -200,19 +200,19 @@ export default function Login() {
       });
       const data = await res.json();
       if (res.ok) {
-        // Store token and user data **before** redirect
+        // Store token and user data safely **before** redirect
         localStorage.setItem('token', data.access_token);
         localStorage.setItem('user', JSON.stringify(data));
         // Small delay to ensure storage is written
         setTimeout(() => {
           if (data.role === 'recorder') {
-            window.location.href = '/recorder';
+            window.location.replace('/recorder');
           } else if (data.role === 'admin') {
-            window.location.href = '/role-select';
+            window.location.replace('/role-select');
           } else {
-            window.location.href = '/monitor';
+            window.location.replace('/monitor');
           }
-        }, 100);
+        }, 150);
       } else {
         setError(typeof data.detail === 'string' ? data.detail : 'Login failed');
       }

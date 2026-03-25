@@ -209,7 +209,9 @@ class RecordingManager:
         fps: float = 25.0,
     ) -> ClipRecorder:
         """Trigger a new clip recording on detection event."""
-        clip = ClipRecorder(camera_id, detected_class, pre_frames, fps=fps)
+        # Halve the FPS relative to capture rate to create slow-motion playback
+        clip_fps = 15.0
+        clip = ClipRecorder(camera_id, detected_class, pre_frames, fps=clip_fps)
         with self._lock:
             if camera_id not in self._clip_recorders:
                 self._clip_recorders[camera_id] = []
