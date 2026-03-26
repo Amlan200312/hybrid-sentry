@@ -201,6 +201,8 @@ export default function Login() {
       const data = await res.json();
       if (res.ok) {
         // Store token and user data safely **before** redirect
+        localStorage.clear();
+        sessionStorage.clear();
         localStorage.setItem('token', data.access_token);
         localStorage.setItem('user', JSON.stringify(data));
         // Small delay to ensure storage is written
@@ -212,7 +214,7 @@ export default function Login() {
           } else {
             window.location.replace('/monitor');
           }
-        }, 150);
+        }, 100);
       } else {
         setError(typeof data.detail === 'string' ? data.detail : 'Login failed');
       }

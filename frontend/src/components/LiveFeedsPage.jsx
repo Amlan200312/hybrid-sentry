@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { authFetch, authWS, getToken, API } from '../utils/api'
-import { X, RefreshCw, Moon, Sun, ChevronDown } from 'lucide-react'
+import { X, RefreshCw, Moon, Sun } from 'lucide-react'
 
 // ── Event Modal ───────────────────────────────────────────────────────────────
 function EventModal({ event, onClose }) {
@@ -69,6 +69,16 @@ function EventModal({ event, onClose }) {
                 </span>
               )}
             </div>
+            {/* ROI Analysis stub */}
+            <div style={{ marginTop: 12 }}>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => window.alert('ROI Analysis coming soon — full implementation in next release.')}
+                style={{ fontSize: 12 }}
+              >
+                🔍 Analyze ROI
+              </button>
+            </div>
           </div>
           <div style={{ borderLeft: '1px solid var(--border)', padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontWeight: 600, fontSize: 13 }}>OCR — Plate / Badge</div>
@@ -99,32 +109,60 @@ function EventModal({ event, onClose }) {
 // ── Label colour coding ───────────────────────────────────────────────────────
 function labelColor(label = '') {
   const l = label.toLowerCase()
-  if (l.includes('person') || l === 'person') return '#388bfd'
-  if (l.includes('vehicle') || l.includes('car') || l.includes('truck')) return '#d29922'
-  if (l.includes('snake') || l.includes('fire') || l.includes('smoke') || l.includes('weapon') || l.includes('armed')) return '#f85149'
-  return '#57ab5a'
+  if (l.includes('person') || l === 'person') return '#388bfd';
+  if (l.includes('vehicle') || l.includes('car')) return '#d29922';
+  if (l.includes('fire') || l.includes('weapon')) return '#f85149';
+  return '#57ab5a';
+}
+
+// ── Processing toggle button ──────────────────────────────────────────────────
+function ProcBtn({ label, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: '5px 10px', fontSize: 11, borderRadius: 8, fontWeight: 600,
+        border: `1px solid ${active ? '#388bfd' : 'var(--border)'}`,
+        background: active ? 'rgba(56,139,253,0.18)' : 'var(--bg-elevated)',
+        color: active ? '#388bfd' : 'var(--text-secondary)',
+        cursor: 'pointer', transition: 'all 0.15s', minHeight: 32
+      }}
+    >
+      {label}
+    </button>
+  )
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function LiveFeedsPage({ isMobile }) {
   const [streamKey, setStreamKey] = useState(0)
   const [nv, setNv] = useState(false)
-  const [activeCamera, setActiveCamera] = useState('CAM-01')
-  const [detectionMode, setDetectionMode] = useState('auto')
+  const activeCamera = 'CAM-01'
   const [monitorEvents, setMonitorEvents] = useState([])
+  const [displayLimit, setDisplayLimit] = useState(20)
   const [liveBoxes, setLiveBoxes] = useState([])
   const [selectedEvent, setSelectedEvent] = useState(null)
-  const [camFilter, setCamFilter] = useState('ALL')
   const [recorders, setRecorders] = useState([])
-  const [cameras, setCameras] = useState([])
   const wsRef = useRef(null)
+
+  // Image processing toggles
+  const [procStates, setProcStates] = useState({ edges: false, sharpen: false, flow: false, bgsub: false })
+
+  const toggleProc = async (key) => {
+    const newVal = !procStates[key]
+    setProcStates(prev => ({ ...prev, [key]: newVal }))
+    await authFetch('/api/feeds/processing', {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: activeCamera, [key]: newVal })
+    }).catch(() => {})
+  }
 
   // ── Fetch initial events ─────────────────────────────────────────────────
   useEffect(() => {
-    authFetch('/api/detections?limit=30')
+    authFetch('/api/detections?limit=60')
       .then(r => r?.json())
       .then(data => {
-        if (Array.isArray(data)) setMonitorEvents(data.slice(0, 30))
+        if (Array.isArray(data)) setMonitorEvents(data)
       })
       .catch(() => {})
   }, [])
@@ -137,31 +175,6 @@ export default function LiveFeedsPage({ isMobile }) {
       .catch(() => {})
   }, [])
 
-  // ── Fetch camera list ────────────────────────────────────────────────────
-  useEffect(() => {
-    authFetch('/api/cameras')
-      .then(r => r?.json())
-      .then(data => { if (Array.isArray(data)) setCameras(data) })
-      .catch(() => {})
-  }, [])
-
-  // ── Fetch Detection Mode ─────────────────────────────────────────────────
-  useEffect(() => {
-    authFetch(`/api/detection/mode/${activeCamera}`)
-      .then(r => r?.json())
-      .then(data => { if (data?.mode) setDetectionMode(data.mode) })
-      .catch(() => {})
-  }, [activeCamera])
-
-  const changeDetectionMode = async (e) => {
-    const newMode = e.target.value;
-    setDetectionMode(newMode);
-    await authFetch(`/api/detection/mode/${activeCamera}`, {
-      method: 'POST',
-      body: JSON.stringify({ mode: newMode })
-    }).catch(() => {})
-  }
-
   // ── WebSocket /ws/monitor ────────────────────────────────────────────────
   useEffect(() => {
     if (wsRef.current && wsRef.current.readyState <= 1) return
@@ -169,7 +182,6 @@ export default function LiveFeedsPage({ isMobile }) {
     wsRef.current.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data)
-        console.log('[WS /ws/monitor]', msg)
         const det = msg.detection || msg.data
 
         if ((msg.type === 'detection' || msg.type === 'new_detection') && det) {
@@ -190,8 +202,8 @@ export default function LiveFeedsPage({ isMobile }) {
             width: det.width ?? det.w ?? 0,
             height: det.height ?? det.h ?? 0,
           }
-          setMonitorEvents(prev => [entry, ...prev].slice(0, 60))
-          if (det.camera_id === activeCamera || !det.camera_id) {
+          setMonitorEvents(prev => [entry, ...prev].slice(0, 200))
+          if (det.camera_id === activeCamera || !det.camera_id || det.camera_id === 'CAM-01') {
             setLiveBoxes(prev => [...prev, { ...entry, _id: Date.now() + Math.random(), _time: Date.now() }])
           }
         }
@@ -219,7 +231,7 @@ export default function LiveFeedsPage({ isMobile }) {
           }
           setMonitorEvents(prev => {
             if (prev.find(e => e.id && e.id === entry.id)) return prev
-            return [entry, ...prev].slice(0, 60)
+            return [entry, ...prev].slice(0, 200)
           })
           setLiveBoxes(prev => [...prev, { ...entry, _id: Date.now() + Math.random(), _time: Date.now() }])
         }
@@ -240,26 +252,26 @@ export default function LiveFeedsPage({ isMobile }) {
     return () => clearInterval(id)
   }, [])
 
-  // ── Night vision toggle ──────────────────────────────────────────────────
+  // ── Night vision toggle — also disables YOLO detection ───────────────────
   const toggleNV = async () => {
+    const newVal = !nv
     await authFetch('/api/feeds/processing', {
       method: 'POST',
-      body: JSON.stringify({ camera_id: activeCamera, night: !nv })
+      body: JSON.stringify({ camera_id: activeCamera, night: newVal, detection_enabled: !newVal })
     }).catch(() => {})
-    setNv(n => !n)
+    setNv(newVal)
   }
 
   const refreshStream = () => setStreamKey(k => k + 1)
 
-  // ── Filtered events ──────────────────────────────────────────────────────
-  const filteredEvents = camFilter === 'ALL'
-    ? monitorEvents
-    : monitorEvents.filter(e => e.camera_id === camFilter)
-
-  const allCamIds = [...new Set(monitorEvents.map(e => e.camera_id).filter(Boolean))]
+  const handleTestDetection = async () => {
+    await authFetch('/api/test/detection', { method: 'POST' }).catch(() => {})
+  }
 
   const token = getToken()
   const streamUrl = `${API}/stream/${activeCamera}?token=${token}`
+
+  const visibleEvents = monitorEvents.slice(0, displayLimit)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
@@ -272,39 +284,44 @@ export default function LiveFeedsPage({ isMobile }) {
           <span className="badge badge-green">Live</span>
         </div>
         <div style={{ flex: 1 }} />
-        
-        {/* Detection Mode Dropdown */}
-        <select 
-          value={detectionMode} 
-          onChange={changeDetectionMode}
-          style={{
-            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-            color: 'var(--text-primary)', borderRadius: 6, fontSize: 12, padding: '4px 8px', cursor: 'pointer'
-          }}
-          title="Detection Mode"
+
+        <button
+          className="btn btn-sm btn-primary"
+          onClick={handleTestDetection}
+          style={{ minHeight: '44px' }}
         >
-          <option value="auto">Auto</option>
-          <option value="full_periodic">Full Periodic</option>
-          <option value="roi_only">ROI Only</option>
-          <option value="full_scan">Full Scan</option>
-        </select>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div className="live-dot" style={{ width: 8, height: 8 }} />
-          <span style={{ fontWeight: 700, fontSize: 15 }}>{activeCamera}</span>
-          <span className="badge badge-green">Live</span>
-        </div>
-        <div style={{ flex: 1 }} />
-        <button className="btn btn-sm btn-secondary" onClick={toggleNV} title="Night Vision">
+          🚨 Test Detection
+        </button>
+        <button
+          className="btn btn-sm btn-secondary"
+          onClick={toggleNV}
+          title="Night Vision (disables YOLO)"
+          style={{ minHeight: '44px' }}
+        >
           {nv ? <Moon size={14} /> : <Sun size={14} />}
           &nbsp;{nv ? 'NV ON' : 'NV OFF'}
         </button>
-        <button className="btn btn-sm btn-secondary" onClick={refreshStream} title="Refresh stream">
+        <button
+          className="btn btn-sm btn-secondary"
+          onClick={refreshStream}
+          title="Refresh stream"
+          style={{ minHeight: '44px' }}
+        >
           <RefreshCw size={14} />
         </button>
       </div>
 
+      {/* IMAGE PROCESSING TOGGLES */}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, marginRight: 4 }}>Filter:</span>
+        <ProcBtn label="Edges" active={procStates.edges} onClick={() => toggleProc('edges')} />
+        <ProcBtn label="Sharpen" active={procStates.sharpen} onClick={() => toggleProc('sharpen')} />
+        <ProcBtn label="Optical Flow" active={procStates.flow} onClick={() => toggleProc('flow')} />
+        <ProcBtn label="Bg Sub" active={procStates.bgsub} onClick={() => toggleProc('bgsub')} />
+      </div>
+
       {/* MAIN CONTENT ROW: video + events */}
-      <div style={{ display: 'flex', gap: 12, flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 12, flex: 1, minHeight: 0 }}>
 
         {/* VIDEO PANEL */}
         <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden', minWidth: 0 }}>
@@ -355,35 +372,23 @@ export default function LiveFeedsPage({ isMobile }) {
                 position: 'absolute', top: 10, left: 10,
                 background: 'rgba(57,255,20,0.18)', border: '1px solid #39ff14',
                 color: '#39ff14', fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12
-              }}>🌙 NV ON</div>
+              }}>🌙 NV ON — YOLO OFF</div>
             )}
           </div>
         </div>
 
         {/* EVENTS PANEL */}
-        <div className="panel" style={{ width: 300, display: 'flex', flexDirection: 'column', minHeight: 0, flexShrink: 0 }}>
+        <div className="panel" style={{ width: isMobile ? '100%' : 300, display: 'flex', flexDirection: 'column', minHeight: isMobile ? 300 : 0, flexShrink: 0 }}>
           <div className="panel-header" style={{ flexShrink: 0 }}>
             <span style={{ fontWeight: 600 }}>Live Events</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="badge badge-blue">{filteredEvents.length}</span>
-              {/* Camera filter */}
-              <select
-                value={camFilter}
-                onChange={e => setCamFilter(e.target.value)}
-                style={{
-                  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-                  color: 'var(--text-primary)', borderRadius: 6, fontSize: 11, padding: '2px 6px', cursor: 'pointer'
-                }}
-              >
-                <option value="ALL">All Cams</option>
-                {allCamIds.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
+              <span className="badge badge-blue">{monitorEvents.length}</span>
             </div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto' }}>
-            {filteredEvents.length === 0 ? (
+            {monitorEvents.length === 0 ? (
               <div className="empty-state" style={{ padding: 20 }}>No detections yet</div>
-            ) : filteredEvents.map((ev, i) => (
+            ) : visibleEvents.map((ev, i) => (
               <div
                 key={ev.id || i}
                 onClick={() => setSelectedEvent(ev)}
@@ -402,8 +407,6 @@ export default function LiveFeedsPage({ isMobile }) {
                   </div>
                   <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', gap: 6 }}>
                     <span>{Math.round((ev.confidence || 0) * 100)}%</span>
-                    {ev.camera_id && <span>• {ev.camera_id}</span>}
-                    {ev.distance_m != null && <span>• ~{ev.distance_m}m</span>}
                   </div>
                 </div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>
@@ -411,14 +414,25 @@ export default function LiveFeedsPage({ isMobile }) {
                 </div>
               </div>
             ))}
+
+            {/* Load More */}
+            {monitorEvents.length > displayLimit && (
+              <div style={{ padding: '8px 12px', textAlign: 'center' }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  style={{ width: '100%', fontSize: 11 }}
+                  onClick={() => setDisplayLimit(l => l + 20)}
+                >
+                  Load more (+20) · {monitorEvents.length - displayLimit} remaining
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* BOTTOM ROW: Recorders + Other Cameras */}
+      {/* BOTTOM ROW: Field Recorders */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
-
-        {/* Recorders */}
         <div>
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
             Field Recorders
@@ -429,17 +443,11 @@ export default function LiveFeedsPage({ isMobile }) {
             ) : recorders.map(rec => (
               <div
                 key={rec.id || rec.username}
-                onClick={() => setActiveCamera('CAM-01')}
                 style={{
-                  width: 150, flexShrink: 0, cursor: 'pointer',
+                  width: 150, flexShrink: 0,
                   background: 'var(--bg-surface)', border: '1px solid var(--border)',
-                  borderRadius: 10, padding: '10px 12px',
-                  transition: 'border-color 0.2s, box-shadow 0.2s',
-                  boxShadow: activeCamera === 'CAM-01' ? '0 0 0 2px #388bfd44' : 'none',
-                  borderColor: activeCamera === 'CAM-01' ? '#388bfd' : 'var(--border)'
+                  borderRadius: 10, padding: '10px 12px'
                 }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = '#388bfd66' }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = activeCamera === 'CAM-01' ? '#388bfd' : 'var(--border)' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <div style={{ width: 7, height: 7, borderRadius: '50%', background: rec.is_online ? '#39ff14' : '#6e7681' }} />
@@ -450,49 +458,6 @@ export default function LiveFeedsPage({ isMobile }) {
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
                   <span>{rec.is_online ? 'Online' : 'Offline'}</span>
                   {rec.battery != null && <span>🔋 {rec.battery}%</span>}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Other Cameras */}
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
-            Cameras
-          </div>
-          <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 4 }}>
-            {/* Always show CAM-01 */}
-            {['CAM-01', ...cameras.map(c => c.camera_id || c.id).filter(id => id && id !== 'CAM-01')].map(camId => (
-              <div
-                key={camId}
-                onClick={() => { setActiveCamera(camId); setStreamKey(k => k + 1) }}
-                style={{
-                  width: 140, flexShrink: 0, cursor: 'pointer',
-                  border: `1px solid ${activeCamera === camId ? '#388bfd' : 'var(--border)'}`,
-                  borderRadius: 8, overflow: 'hidden',
-                  boxShadow: activeCamera === camId ? '0 0 0 2px #388bfd44' : 'none',
-                  transition: 'box-shadow 0.2s, border-color 0.2s'
-                }}
-              >
-                {/* Thumbnail */}
-                <div style={{ width: '100%', aspectRatio: '16/9', background: '#0d1117', overflow: 'hidden', position: 'relative' }}>
-                  <img
-                    src={`${API}/stream/${camId}?token=${token}&thumb=1`}
-                    alt={camId}
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.85 }}
-                    onError={e => { e.target.style.display = 'none' }}
-                  />
-                  {activeCamera === camId && (
-                    <div style={{
-                      position: 'absolute', top: 4, right: 4,
-                      background: '#388bfd', color: '#fff', fontSize: 9, fontWeight: 700,
-                      padding: '1px 5px', borderRadius: 4
-                    }}>ACTIVE</div>
-                  )}
-                </div>
-                <div style={{ padding: '4px 8px', fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', background: 'var(--bg-surface)' }}>
-                  {camId}
                 </div>
               </div>
             ))}

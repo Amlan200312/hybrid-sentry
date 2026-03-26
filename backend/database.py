@@ -70,6 +70,10 @@ class User(Base):
     login_history = relationship("LoginHistory", back_populates="user_obj", lazy="dynamic")
 
 
+# Composite index for fast role+active queries (e.g., list recorders)
+Index("ix_users_role_active", User.role, User.is_active)
+
+
 # ─────────────────────────────────────────
 # 2. DETECTION EVENTS
 # ─────────────────────────────────────────
@@ -177,6 +181,7 @@ class BehaviorTimeline(Base):
 
     __table_args__ = (
         Index("ix_behavior_track_cam", "track_id", "camera_id"),
+        Index("ix_behavior_track_id_only", "track_id"),
     )
 
 

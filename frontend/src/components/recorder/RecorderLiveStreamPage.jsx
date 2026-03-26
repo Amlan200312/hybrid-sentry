@@ -6,7 +6,9 @@ export default function RecorderLiveStreamPage({ isMobile }) {
   const [nv, setNv] = useState(false)
   const [streaming, setStreaming] = useState(true)
   const [detections, setDetections] = useState([])
+  const [displayLimit, setDisplayLimit] = useState(20)
   const [liveBoxes, setLiveBoxes] = useState([])
+  const [procStates, setProcStates] = useState({ edges: false, sharpen: false, flow: false, bgsub: false })
   const wsRef = useRef(null)
   const [streamStats] = useState({ fps: 24 })
 
@@ -26,7 +28,7 @@ export default function RecorderLiveStreamPage({ isMobile }) {
       wsRef.current.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
-          console.log('[WS /ws/detections] received:', msg)
+          console.log('WS msg:', msg)
           // Backend sends { type:'detection', data:{...} } OR { type:'detection', detection:{...} }
           const det = msg.detection || msg.data
           if (msg.type === 'detection' && det) {
@@ -84,11 +86,21 @@ export default function RecorderLiveStreamPage({ isMobile }) {
   const toggleStream = () => setStreaming(s => !s)
 
   const toggleNV = async () => {
+    const newVal = !nv
     await authFetch(`/api/feeds/processing`, {
       method: 'POST',
-      body: JSON.stringify({ camera_id: 'CAM-01', night: !nv })
+      body: JSON.stringify({ camera_id: 'CAM-01', night: newVal, detection_enabled: !newVal })
     }).catch(()=>{})
-    setNv(!nv)
+    setNv(newVal)
+  }
+
+  const toggleProc = async (key) => {
+    const newVal = !procStates[key]
+    setProcStates(prev => ({ ...prev, [key]: newVal }))
+    await authFetch('/api/feeds/processing', {
+      method: 'POST',
+      body: JSON.stringify({ camera_id: 'CAM-01', [key]: newVal })
+    }).catch(() => {})
   }
 
   const handleSnapshot = async () => authFetch('/api/recordings/CAM-01/snapshot', { method: 'POST' }).catch(()=>{})
@@ -223,6 +235,20 @@ export default function RecorderLiveStreamPage({ isMobile }) {
             <span className="badge badge-muted" style={{ fontFamily: 'monospace' }}>Resolution: 1280x720</span>
             <span className="badge badge-muted" style={{ fontFamily: 'monospace' }}>Bitrate: 2.4 Mbps</span>
           </div>
+
+          {/* Image processing toggles */}
+          <div style={{ padding: '4px 8px 8px', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>Filter:</span>
+            {[['edges','Edges'],['sharpen','Sharpen'],['flow','Flow'],['bgsub','BgSub']].map(([k, label]) => (
+              <button key={k} onClick={() => toggleProc(k)} style={{
+                padding: '4px 9px', fontSize: 11, borderRadius: 8, fontWeight: 600,
+                border: `1px solid ${procStates[k] ? '#388bfd' : 'var(--border)'}`,
+                background: procStates[k] ? 'rgba(56,139,253,0.18)' : 'var(--bg-elevated)',
+                color: procStates[k] ? '#388bfd' : 'var(--text-secondary)',
+                cursor: 'pointer', minHeight: 30
+              }}>{label}</button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -239,7 +265,7 @@ export default function RecorderLiveStreamPage({ isMobile }) {
                 No detections yet — stream to start detecting
               </div>
             ) : (
-              detections.map((d, i) => (
+              detections.slice(0, displayLimit).map((d, i) => (
                 <div key={d.id || i} style={{
                   display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
                   borderBottom: '1px solid var(--border)'
@@ -263,6 +289,21 @@ export default function RecorderLiveStreamPage({ isMobile }) {
                   )}
                 </div>
               ))
+            )}
+            {/* Load More */}
+            {detections.length > displayLimit && (
+              <div style={{ padding: '8px 12px', textAlign: 'center' }}>
+                <button
+                  onClick={() => setDisplayLimit(l => l + 20)}
+                  style={{
+                    width: '100%', padding: '6px 0', fontSize: 11, borderRadius: 8,
+                    border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+                    color: 'var(--text-secondary)', cursor: 'pointer', fontWeight: 600
+                  }}
+                >
+                  Load more (+20) · {detections.length - displayLimit} remaining
+                </button>
+              </div>
             )}
           </div>
         </div>

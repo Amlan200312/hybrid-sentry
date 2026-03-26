@@ -8,6 +8,7 @@ import warnings
 warnings.filterwarnings("ignore")
 import json
 import asyncio
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -97,12 +98,54 @@ _system_logs: _deque = _deque(maxlen=200)
 _main_loop = None
 
 # ─────────────────────────────────────────
+# DETECTION THROTTLE / DIRECTION HELPERS
+# ─────────────────────────────────────────
+# Per-track_id last-log timestamp for 2 s cooldown
+_log_cooldown: dict = {}   # track_id → float (epoch seconds)
+# Per-track_id previous bbox for speed/direction calculation
+_prev_bbox: dict = {}      # track_id → [x, y, w, h]
+
+
+def _calc_direction(dx: float, dy: float) -> str:
+    """Return compass direction string from motion vector (dx, dy)."""
+    if abs(dx) < 0.01 and abs(dy) < 0.01:
+        return "stationary"
+    angle = math.atan2(dy, dx) * 180 / math.pi
+    if angle < 0:
+        angle += 360
+    if angle < 22.5 or angle >= 337.5:
+        return "E"
+    elif angle < 67.5:
+        return "NE"
+    elif angle < 112.5:
+        return "N"
+    elif angle < 157.5:
+        return "NW"
+    elif angle < 202.5:
+        return "W"
+    elif angle < 247.5:
+        return "SW"
+    elif angle < 292.5:
+        return "S"
+    else:
+        return "SE"
+
+# ─────────────────────────────────────────
 # STARTUP / SHUTDOWN
 # ─────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     global _main_loop
     _main_loop = asyncio.get_running_loop()
+
+    # Drop database to ensure schema matches latest columns
+    db_file = Path("sentry.db")
+    if db_file.exists():
+        try:
+            db_file.unlink()
+            print("[MAIN] Existing database dropped to apply new schema.")
+        except Exception as e:
+            print(f"[MAIN] Failed to drop database: {e}")
 
     # Initialize database
     init_db()
@@ -178,11 +221,19 @@ async def shutdown():
 # ─────────────────────────────────────────
 async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
     """Save detection to DB and route to verify queue or event log."""
-    print(f"[MAIN] Detection event received: {det.get('detected_class')} on {camera_id}")
-    from database import SessionLocal, DetectionEvent, VerifyQueue
+    from database import SessionLocal, DetectionEvent, VerifyQueue, SystemConfig, BehaviorTimeline
     from recording import recording_manager
-    import cv2, numpy as np
 
+    # ── 2-second per-track_id logging throttle ────────────────────────────
+    track_id = det.get("track_id")
+    now_ts = time.time()
+    if track_id is not None and det.get("route") != "zone_event":
+        last_ts = _log_cooldown.get(track_id, 0)
+        if now_ts - last_ts < 2.0:
+            return   # skip DB write; bbox overlay still rendered via latest_detections
+        _log_cooldown[track_id] = now_ts
+
+    print(f"[MAIN] Detection event: {det.get('detected_class')} on {camera_id}")
     db = SessionLocal()
     try:
         # Save screenshot
@@ -192,45 +243,67 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
                 annotated_frame, camera_id, det.get("detected_class", "")
             )
 
-        # Save clip from circular buffer
+        # Save clip from circular buffer (with error handling)
         state = feed_manager.get_state(camera_id)
         clip_path = ""
         if state:
-            pre_frames = [f for f, _ in state.frame_buffer.snapshot()]
-            if pre_frames:
-                clip_rec = recording_manager.trigger_clip(
-                    camera_id,
-                    det.get("detected_class", "detection"),
-                    pre_frames,
-                )
-                clip_path = clip_rec.filepath or ""
+            try:
+                pre_frames = [f for f, _ in state.frame_buffer.snapshot()]
+                if pre_frames:
+                    clip_rec = recording_manager.trigger_clip(
+                        camera_id,
+                        det.get("detected_class", "detection"),
+                        pre_frames,
+                    )
+                    candidate = clip_rec.filepath or ""
+                    # File validation — clip is written async, size may be 0 right now but path is valid
+                    clip_path = candidate  # store path immediately; file completes in background
+            except Exception as clip_err:
+                print(f"[CLIP] Error creating clip: {clip_err}")
+                clip_path = ""
 
         # GPS from nearest recorder
         gps_positions = gps_manager.get_all_positions()
         gps_lat = gps_positions[0].get("latitude") if gps_positions else None
         gps_lng = gps_positions[0].get("longitude") if gps_positions else None
 
-        # ── Distance estimation via pinhole camera model ──────────────────
-        # Assumes: person avg height = 1.7m, focal_length = 800px (adjust per camera)
+        # ── Distance estimation — read calibrated focal length from DB ─────
         distance_m = det.get("distance_m")
         if not distance_m and det.get("bbox") and annotated_frame is not None:
             bbox = det["bbox"]
             detected_class = det.get("detected_class", "")
-            fh_full, fw_full = annotated_frame.shape[:2]
             real_heights = {"person": 1.7, "vehicle": 1.5, "bicycle": 1.1, "dog": 0.5}
             real_h = real_heights.get(detected_class, 1.0)
-            focal_len_px = 800  # approximate; calibrate for your camera
-            bbox_pixel_h = abs(bbox[3] - bbox[1])  # y2 - y1
-            if bbox_pixel_h > 5:  # guard against near-zero division
+            try:
+                flen_row = db.query(SystemConfig).filter(SystemConfig.key == "camera_focal_len").first()
+                focal_len_px = float(flen_row.value) if flen_row and flen_row.value else 800.0
+            except Exception:
+                focal_len_px = 800.0
+            bbox_pixel_h = abs(bbox[3] - bbox[1])
+            if bbox_pixel_h > 5:
                 distance_m = round((real_h * focal_len_px) / bbox_pixel_h, 1)
 
+        # ── Compute direction + speed from previous bbox ───────────────────
+        speed_ms = det.get("speed_ms", 0.0)
+        direction = "stationary"
+        current_bbox = det.get("bbox")
+        if track_id is not None and current_bbox and track_id in _prev_bbox:
+            pb = _prev_bbox[track_id]
+            dx = float(current_bbox[0] - pb[0])
+            dy = float(current_bbox[1] - pb[1])
+            direction = _calc_direction(dx, dy)
+            pixel_dist = math.sqrt(dx * dx + dy * dy)
+            speed_ms = round(pixel_dist / 30.0, 2)
+        if track_id is not None and current_bbox:
+            _prev_bbox[track_id] = current_bbox
+
         ev = DetectionEvent(
-            track_id=det.get("track_id"),
+            track_id=track_id,
             detected_class=det.get("detected_class", "unknown"),
             display_label=det.get("display_label", "Unknown"),
             confidence=det.get("confidence", 0.0),
             distance_m=distance_m,
-            speed_ms=det.get("speed_ms", 0.0),
+            speed_ms=speed_ms,
             zone_name=det.get("zone"),
             camera_id=camera_id,
             gps_lat=gps_lat,
@@ -248,6 +321,24 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
         db.add(ev)
         db.commit()
         db.refresh(ev)
+
+        # ── BehaviorTimeline entry ─────────────────────────────────────────
+        if track_id is not None:
+            try:
+                timeline = BehaviorTimeline(
+                    track_id=track_id,
+                    camera_id=camera_id,
+                    detection_id=ev.id,
+                    event_type="entered",
+                    description=f"{det.get('detected_class', 'unknown')} moving {direction}",
+                    speed_ms=speed_ms,
+                    zone_name=det.get("zone"),
+                    timestamp=datetime.utcnow(),
+                )
+                db.add(timeline)
+                db.commit()
+            except Exception as tl_err:
+                print(f"[TIMELINE] Error writing timeline: {tl_err}")
 
         # Route to verify queue
         if det.get("route") == "verify_queue":
@@ -332,28 +423,21 @@ async def _handle_detection_event(camera_id: str, det: dict, annotated_frame):
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-        print(f"[BROADCAST] Detection event: camera={camera_id}, class={det.get('detected_class')}, confd={det.get('confidence'):.2f}, boxes={boxes_list}")
-        print(f"[BROADCAST] Sending to {len(_detection_ws_list)} detection WS client(s)")
         dead = []
         for ws in _detection_ws_list:
             try:
                 await ws.send_json(detection_payload)
-                print(f"[BROADCAST] -> detection WS ok")
-            except Exception as ex:
-                print(f"[BROADCAST] -> detection WS error: {ex}")
+            except Exception:
                 dead.append(ws)
         for ws in dead:
             if ws in _detection_ws_list:
                 _detection_ws_list.remove(ws)
 
-        print(f"[BROADCAST] Sending to {len(_monitor_ws_list)} monitor WS client(s)")
         dead = []
         for ws in _monitor_ws_list:
             try:
                 await ws.send_json(monitor_payload)
-                print(f"[BROADCAST] -> monitor WS ok")
-            except Exception as ex:
-                print(f"[BROADCAST] -> monitor WS error: {ex}")
+            except Exception:
                 dead.append(ws)
         for ws in dead:
             if ws in _monitor_ws_list:
@@ -601,6 +685,27 @@ async def auth_me(
 # ─────────────────────────────────────────
 # SYSTEM SETUP ENDPOINTS
 # ─────────────────────────────────────────
+@app.post("/api/test/detection")
+async def test_detection(current_user: dict = Depends(require_any)):
+    fake = {
+        "id": 9999,
+        "label": "TEST",
+        "display_label": "Test Detection",
+        "confidence": 0.99,
+        "camera_id": "CAM-01",
+        "timestamp": datetime.utcnow().isoformat(),
+        "x": 0.2, "y": 0.3, "width": 0.1, "height": 0.2,
+        "boxes": [{"label": "TEST", "confidence": 0.99, "x": 0.2, "y": 0.3, "w": 0.1, "h": 0.2}]
+    }
+    for ws in _detection_ws_list:
+        try: await ws.send_json({"type": "detection", "data": fake})
+        except: pass
+    for ws in _monitor_ws_list:
+        try: await ws.send_json({"type": "new_detection", **fake})
+        except: pass
+    return {"success": True}
+
+
 @app.get("/api/system/setup-required")
 async def setup_required(db: Session = Depends(get_db)):
     """Check if the system needs initial setup (no users exist)."""
@@ -1670,6 +1775,7 @@ class ProcessingToggle(BaseModel):
     zoom: Optional[bool] = None
     compare: Optional[bool] = None
     freeze: Optional[bool] = None
+    detection_enabled: Optional[bool] = None  # explicit override for YOLO detection
 
 
 @app.post("/api/feeds/processing")
@@ -1682,7 +1788,10 @@ async def set_processing_toggles(
         raise HTTPException(404, "Camera not found")
 
     p = state.pipeline
-    if req.night is not None: p.night_mode = req.night
+    if req.night is not None:
+        p.night_mode = req.night
+        # Night vision disables YOLO detection automatically
+        state.detection_enabled = not req.night
     if req.flow is not None:  p.flow_mode  = req.flow
     if req.edges is not None: p.edges_mode = req.edges
     if req.bgsub is not None: p.bgsub_mode = req.bgsub
@@ -1691,6 +1800,9 @@ async def set_processing_toggles(
     if req.zoom is not None:  p.zoom_mode  = req.zoom
     if req.compare is not None: p.compare_mode = req.compare
     if req.freeze is not None: p.freeze_mode = req.freeze
+    # Explicit override always wins (even if night was also set)
+    if req.detection_enabled is not None:
+        state.detection_enabled = req.detection_enabled
 
     return {"success": True}
 
@@ -1716,12 +1828,140 @@ async def get_processing_toggles(
         "zoom_mode": p.zoom_mode,
         "compare_mode": p.compare_mode,
         "freeze_mode": p.freeze_mode,
+        "detection_enabled": state.detection_enabled,
     }
 
 
 # ─────────────────────────────────────────
-# WEBSOCKET — MONITOR DASHBOARD
+# DETECTIONS ALIAS (/api/detections → /api/events)
 # ─────────────────────────────────────────
+@app.get("/api/detections")
+async def list_detections_alias(
+    limit: int = 30,
+    offset: int = 0,
+    camera_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Alias of /api/events for frontend compatibility."""
+    q = db.query(DetectionEvent).order_by(DetectionEvent.timestamp.desc())
+    if camera_id:
+        q = q.filter(DetectionEvent.camera_id == camera_id)
+    events = q.offset(offset).limit(limit).all()
+    return [
+        {
+            "id": ev.id,
+            "track_id": ev.track_id,
+            "detected_class": ev.detected_class,
+            "display_label": ev.display_label,
+            "confidence": ev.confidence,
+            "distance_m": ev.distance_m,
+            "speed_ms": ev.speed_ms,
+            "camera_id": ev.camera_id,
+            "zone_name": ev.zone_name,
+            "timestamp": ev.timestamp.isoformat() if ev.timestamp else None,
+            "status": ev.status,
+            "screenshot_path": ev.screenshot_path,
+            "clip_path": ev.clip_path,
+        }
+        for ev in events
+    ]
+
+
+# ─────────────────────────────────────────
+# CLIP SERVE BY EVENT ID
+# ─────────────────────────────────────────
+@app.get("/api/recordings/clip/{event_id}")
+async def serve_event_clip(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_any),
+):
+    """Serve the video clip for a specific detection event."""
+    ev = db.query(DetectionEvent).filter(DetectionEvent.id == event_id).first()
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if not ev.clip_path:
+        raise HTTPException(404, "No clip recorded for this event")
+    clip_file = Path(ev.clip_path)
+    if not clip_file.exists():
+        raise HTTPException(404, "Clip file not found on disk")
+    return FileResponse(str(clip_file), media_type="video/mp4", filename=clip_file.name)
+
+
+# ─────────────────────────────────────────
+# DISTANCE CALIBRATION
+# ─────────────────────────────────────────
+class CalibrationRequest(BaseModel):
+    distance_m: float           # known distance to the object in metres
+    bbox_height_px: int         # height of the bounding box in pixels
+    object_height_m: float = 1.7  # real-world height of the object (default: person)
+
+
+@app.post("/api/camera/calibrate")
+async def calibrate_camera(
+    req: CalibrationRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
+    """Compute and store focal length from a known-distance sample."""
+    if req.bbox_height_px <= 0:
+        raise HTTPException(400, "bbox_height_px must be positive")
+    focal = (req.bbox_height_px * req.distance_m) / req.object_height_m
+    focal = round(focal, 2)
+    row = db.query(SystemConfig).filter(SystemConfig.key == "camera_focal_len").first()
+    if row:
+        row.value = str(focal)
+    else:
+        db.add(SystemConfig(key="camera_focal_len", value=str(focal)))
+    db.commit()
+    return {"focal_len_px": focal, "stored": True}
+
+
+# ─────────────────────────────────────────
+# GPS HEATMAP (zone-based detection counts)
+# ─────────────────────────────────────────
+@app.get("/api/heatmap/gps")
+async def get_gps_heatmap(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_admin_or_monitor),
+):
+    """Return detection counts per active GPS/zone for a simple zone-level heatmap."""
+    zones = db.query(Zone).filter(Zone.is_active == True).all()
+    result = []
+    for z in zones:
+        count = db.query(DetectionEvent).filter(DetectionEvent.zone_name == z.zone_name).count()
+        result.append({"zone_name": z.zone_name, "zone_type": z.zone_type, "count": count})
+    return result
+
+
+# ─────────────────────────────────────────
+# ROI ANALYSIS — STUB
+# ─────────────────────────────────────────
+class RoiAnalysisRequest(BaseModel):
+    video_path: str
+    roi: list               # [{x, y, w, h}]
+    start_sec: float = 0.0
+    end_sec: float = 30.0
+
+
+@app.post("/api/analysis/roi")
+async def analyze_roi(
+    req: RoiAnalysisRequest,
+    current_user: dict = Depends(require_admin_or_monitor),
+):
+    """ROI analysis placeholder — returns empty detections list (full implementation pending)."""
+    return {
+        "status": "stub",
+        "video_path": req.video_path,
+        "roi": req.roi,
+        "start_sec": req.start_sec,
+        "end_sec": req.end_sec,
+        "detections": [],
+        "message": "ROI analysis backend is in planning; full implementation coming soon.",
+    }
+
+
 @app.websocket("/ws/monitor")
 async def ws_monitor(websocket: WebSocket, token: str = ""):
     payload = ws_authenticate(token)

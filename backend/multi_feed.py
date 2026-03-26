@@ -91,6 +91,11 @@ class CameraState:
         self._heartbeat_miss = 0
         self._last_heartbeat = time.time()
 
+        # Motion-based auto-sleep for YOLO
+        self.no_motion_counter: int = 0
+        self.yolo_enabled: bool = True       # False after 50 frames with no motion
+        self.detection_enabled: bool = True  # Controlled externally (night vision, etc.)
+
         # Thread handles
         self._cap_thread: Optional[threading.Thread] = None
         self._motion_thread: Optional[threading.Thread] = None
@@ -211,10 +216,10 @@ class MultiFeedManager:
         source = state.source
         if isinstance(source, int) or isinstance(source, str):
             cap = cv2.VideoCapture(source)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 270)
+            cap.set(cv2.CAP_PROP_FPS, 8)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
-            cap.set(cv2.CAP_PROP_FPS, 10)
             width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
             height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
             print(f"[CAM] {state.camera_id} resolution: {int(width)}x{int(height)}")
@@ -227,7 +232,7 @@ class MultiFeedManager:
         last_log_time = time.time()
         frame_counter = 0
         consecutive_failures = 0
-        MAX_FAILURES = 30  # ~3 seconds at 10 FPS before attempting reopen
+        MAX_FAILURES = 3  # Reduced from 10 for faster camera reconnect
 
         while not state._stop_event.is_set():
             t_start = time.time()
@@ -249,10 +254,10 @@ class MultiFeedManager:
                 if cap:
                     cap.release()
                 cap = cv2.VideoCapture(source)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 270)
+                cap.set(cv2.CAP_PROP_FPS, 8)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
-                cap.set(cv2.CAP_PROP_FPS, 10)
                 state.cap = cap
                 consecutive_failures = 0
                 time.sleep(1.0)
@@ -300,12 +305,12 @@ class MultiFeedManager:
                         x, y, w, h = bbox
                         cv2.rectangle(processed, (x, y), (x + w, y + h), (57, 255, 20), 2)
 
-            # Processing mode indicator (top-left)
-            mode_text = state.processing_mode
-            cv2.putText(processed, mode_text, (8, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(processed, mode_text, (8, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (57, 255, 20), 1, cv2.LINE_AA)
+            # Processing mode indicator — commented out (clean stream, no debug overlays)
+            # mode_text = state.processing_mode
+            # cv2.putText(processed, mode_text, (8, 20),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 4, cv2.LINE_AA)
+            # cv2.putText(processed, mode_text, (8, 20),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (57, 255, 20), 1, cv2.LINE_AA)
 
             # Push raw frame for motion thread (only every 2nd frame to reduce YOLO load)
             frame_counter += 1
@@ -354,6 +359,18 @@ class MultiFeedManager:
 
             now = time.time()
 
+            # ── Motion-based auto-sleep ──────────────────────────────────────
+            # Track consecutive frames with no motion (camera at ~10 fps → 50 frames ≈ 5 s)
+            if motion_count == 0:
+                state.no_motion_counter += 1
+            else:
+                state.no_motion_counter = 0
+
+            if state.no_motion_counter >= 50:
+                state.yolo_enabled = False   # YOLO sleeps — no motion for 5 s
+            else:
+                state.yolo_enabled = True    # Wake up as soon as any motion detected
+
             # YOLO strategy decision
             if state.mode == 'full_scan':
                 self._enqueue_for_yolo(state, frame, motion_rects, 'full')
@@ -389,6 +406,9 @@ class MultiFeedManager:
         mode: str,
     ):
         """Put a frame into the global YOLO queue."""
+        # Guard: skip if YOLO is sleeping (no motion) or detection is disabled (e.g. night vision)
+        if not state.yolo_enabled or not state.detection_enabled:
+            return
         try:
             self._yolo_queue.put_nowait({
                 "camera_id": state.camera_id,
@@ -476,15 +496,14 @@ class MultiFeedManager:
         """
         Yields MJPEG frames for a camera.
         FastAPI StreamingResponse compatible generator.
-        If no new frame arrives within 5 s, yields an offline placeholder
+        If no new frame arrives within 3 s, yields an offline placeholder
         so the HTTP response never hangs.
         """
         state = self._cameras.get(camera_id)
         if not state:
             return
 
-        TIMEOUT = 5.0   # seconds before yielding a placeholder
-
+        last_frame_time = time.time()
         last_yield = time.time()
         last_jpeg_sent = None   # track to avoid flooding identical frames
 
@@ -506,7 +525,8 @@ class MultiFeedManager:
                 if elapsed < 1/15:
                     time.sleep(1/15 - elapsed)
                 last_yield = time.time()
-            elif now - last_yield > TIMEOUT:
+                last_frame_time = time.time()
+            elif (jpeg is None and now - last_frame_time > 2.0) or (now - last_yield > 2.0):
                 # Generate a placeholder to avoid the client hanging
                 placeholder = self._make_offline_frame(state)
                 ret, buf = cv2.imencode(".jpg", placeholder, [cv2.IMWRITE_JPEG_QUALITY, 50])
@@ -517,6 +537,7 @@ class MultiFeedManager:
                         + buf.tobytes()
                         + b"\r\n"
                     )
+                last_frame_time = time.time()
                 last_yield = time.time()
             else:
                 time.sleep(0.04)   # ~25 Hz poll
